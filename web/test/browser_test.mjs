@@ -173,8 +173,8 @@ try {
   check(fs.existsSync(mjFile), "combined: Mojang hit downloaded");
   const vv = spawnSync("py", ["skinhash.py", "verify", nmFile, mjFile], { cwd: repo, encoding: "utf8" });
   check(vv.status === 0 && /^OK/.test(vv.stdout), `combined: skinhash.py verify <namemc hit> <mojang hit>: ${vv.stdout.trim().slice(0, 90)}`);
-  const ids = spawnSync("py", ["skinhash.py", "namemc-id", nmFile, mjFile], { cwd: repo, encoding: "utf8" });
-  const idl = ids.stdout.trim().split(/\r?\n/).map((l) => l.split(/\s+/)[0]);
+  const ids = spawnSync("py", ["skinhash.py", "ids", nmFile, mjFile], { cwd: repo, encoding: "utf8" });
+  const idl = [...ids.stdout.matchAll(/^\s+NameMC\s+([0-9a-f]{16})\s/gm)].map((m) => m[1]);
   check(idl.length === 2 && idl[0] === idl[1] && idl[0] === path.basename(nmFile, ".png"), `combined: NameMC id unchanged by the Mojang search (${idl.join(" = ")})`);
 
   // ---------- Both mode: NameMC beef, then Mojang cafe, one click ----------
@@ -212,8 +212,9 @@ try {
     check(bv.status === 0 && /^OK/.test(bv.stdout), `Both: skinhash.py verify <phase-1 hit> <final>: ${bv.stdout.trim().slice(0, 80)}`);
     const bv0 = spawnSync("py", ["skinhash.py", "verify", skin, finalF], { cwd: repo, encoding: "utf8" });
     check(bv0.status === 0 && /^OK/.test(bv0.stdout), `Both: skinhash.py verify <original> <final>: ${bv0.stdout.trim().slice(0, 80)}`);
-    const bid = spawnSync("py", ["skinhash.py", "namemc-id", finalF], { cwd: repo, encoding: "utf8" });
-    check(bid.stdout.trim().startsWith(fin[0].id16), `Both: skinhash.py namemc-id shows ${bid.stdout.trim().split(/\s+/)[0]}`);
+    const bid = spawnSync("py", ["skinhash.py", "ids", finalF], { cwd: repo, encoding: "utf8" });
+    const bidNm = (bid.stdout.match(/^\s+NameMC\s+([0-9a-f]{16})\s/m) || [])[1];
+    check(bidNm === fin[0].id16, `Both: skinhash.py ids shows NameMC ${bidNm}`);
     check(path.basename(finalF).startsWith("cafe"), "Both: Mojang id starts with cafe");
   }
   // starting again begins with phase 1 on the original skin

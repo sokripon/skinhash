@@ -1,33 +1,21 @@
-"""Skin helper: knob-pixel selection, Mojang re-encoding, search wrapper, verification.
+"""skinhash: find invisible variations of a Minecraft skin whose Mojang texture id and/or NameMC
+id looks cool.
 
-  py skinhash.py predict SKIN.png              -> texture id Mojang would assign
-  py skinhash.py knobs SKIN.png [--unused-only] -> pixels the search may change
-  py skinhash.py search SKIN.png [finder options...] [--unused-only] [--generic] [--k N] [--out DIR]
-      Fast mode (fastfinder.exe, permutes the RGB of the last K pixels) runs when those pixels
-      are all invisible. Otherwise, or with --generic, hashfinder.exe runs.
-      -p HEX matches the trimmed id (leading zeros dropped, as in the URL). -z N means N leading zeros.
-      --gpu: search on the GPU with gpufinder.exe (CUDA). Falls back to CPU fastfinder if
-      gpufinder is missing or fails its self-check.
-      --fast: require fast mode (CPU or GPU). Stops with the reason instead of falling back to the
-      300x slower generic search.
-      --all: run until every -p/-s/-z target has a hit. Restarts without each found target;
-      -n is ignored.
-      Every search adds an invisible watermark (6 transparent unused pixels whose RGB spells
-      "sokripon skinhash" + 03, normally at (0,7)-(5,7)). --no-watermark turns it off.
-  py skinhash.py verify BASE.png FOUND.png     -> FOUND looks identical in game and hashes to its name
-  py skinhash.py namemc SKIN.png [--gpu] [--unused-only] [-p HEX] [-s HEX] [-z N] [-n N] [--out DIR] [--all]
-      NameMC mode: finds a skin whose NameMC id (namemc.com/skin/<16 hex>) matches. The knob is three
-      overlay/unused pixels that are fully transparent in SKIN.png; they get alpha 1 and a counter as RGB.
-      Fixed-width 16 hex id, prefixes may start with 0. Uses namemcfinder.exe, or namemcgpu.exe with --gpu.
-      The result can then go through `search` for a Mojang id; the NameMC id stays the same.
-  py skinhash.py namemc-id FILE...             -> NameMC id (and Mojang texture id) of skin files
-  py skinhash.py detect FILE|ID|URL...         -> was this skin made by skinhash? (IDs and URLs are downloaded)
+  py skinhash.py --help           the commands
+  py skinhash.py COMMAND --help   options and examples of one command
+
+Commands: mojang, namemc, both (searches), ids, verify, detect, pixels, bench.
+The searches drive the native finders (hashfinder, fastfinder, gpufinder, namemcfinder, namemcgpu,
+built with build.ps1) and verify every hit. See README.md and docs/how-it-works.md.
 """
+import argparse
 import hashlib
 import os
+import re
 import struct
 import subprocess
 import sys
+import tempfile
 import zlib
 
 from PIL import Image
@@ -208,36 +196,6 @@ def apply_watermark(rgba, avoid=()):
     return [(x + j, y) for j in range(len(px))]
 
 
-def cmd_detect(targets):
-    import urllib.request
-    import io
-    for t in targets:
-        if os.path.exists(t):
-            data, label = open(t, "rb").read(), t
-        else:
-            tid = t.rstrip("/").rsplit("/", 1)[-1].lower()
-            url = f"https://textures.minecraft.net/texture/{tid}"
-            data, label = urllib.request.urlopen(url, timeout=20).read(), url
-        im = Image.open(io.BytesIO(data))
-        if im.size != (W, H):
-            print(f"no   {label} (not a 64x64 skin)")
-            continue
-        f = find_watermark(bytearray(im.convert("RGBA").tobytes()))
-        print(f"{'YES' if f else 'no '}  {label}" + (f" (watermark v{f[0]} at {f[1]})" if f else ""))
-
-
-def cmd_predict(path):
-    png = mojang_png(load_rgba(path))
-    print(texture_id(png))
-
-
-def cmd_knobs(path, unused_only):
-    rgba = load_rgba(path)
-    k = knob_pixels(rgba, unused_only)
-    offs, used = knob_offsets(k)
-    print(f"{len(k)} invisible pixels available; search uses {used} (bytes {offs})")
-
-
 # Exit codes for Ctrl+C: Windows STATUS_CONTROL_C_EXIT, POSIX SIGINT.
 INTERRUPT_CODES = {0xC000013A, -2, 130}
 
@@ -250,18 +208,25 @@ def stopped(msg="stopped (Ctrl+C)"):
 STOPPED_BY_US = "stopped-by-wrapper"
 ROLLOVER_RC = 7      # gpufinder: this value set is exhausted
 LAST_ROLLOVER = None  # (cumulative tried, cumulative seconds) from the last ROLLOVER line
+LAST_RATE = None      # candidates/s from the last RATE line (benchmark)
+GPU_FAILED = False    # the GPU search fell back to the CPU
 
 
 def run_finder(cmd, rgba, on_hit=None, verifier=None):
     """Run a finder and verify its hits. Ctrl+C ends the whole search, never a fallback.
     If on_hit(why, path) returns True the finder is stopped; the rest of its output is
     still verified and STOPPED_BY_US is returned."""
-    global LAST_ROLLOVER
+    global LAST_ROLLOVER, LAST_RATE
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, text=True)
     asked_stop = False
     try:
         for line in proc.stdout:
             print(line, end="", flush=True)
+            if line.startswith("RATE "):
+                try:
+                    LAST_RATE = float(line.split()[1])
+                except (IndexError, ValueError):
+                    pass
             if line.startswith("ROLLOVER "):
                 try:
                     kv = dict(x.split("=", 1) for x in line.split()[1:])
@@ -287,23 +252,6 @@ def run_finder(cmd, rgba, on_hit=None, verifier=None):
     return rc
 
 
-def split_targets(args):
-    """Split finder args into (targets, other args). Targets: 'prefix:x', 'suffix:x', 'zeros:N'."""
-    targets, rest, i = [], [], 0
-    while i < len(args):
-        a = args[i]
-        if a in ("-p", "-s", "-z") and i + 1 < len(args):
-            kind = {"-p": "prefix", "-s": "suffix", "-z": "zeros"}[a]
-            targets.append(f"{kind}:{args[i + 1].lower()}")
-            i += 2
-        elif a == "-n" and i + 1 < len(args):
-            i += 2  # --all decides when to stop
-        else:
-            rest.append(a)
-            i += 1
-    return targets, rest
-
-
 def target_args(targets):
     out = []
     for t in targets:
@@ -320,7 +268,6 @@ def hit_target(why, targets):
         if tk == kind and (tv == val or (kind == "zeros" and int(val) >= int(tv))):
             return t
     return None
-
 
 def drop_seed(args):
     """args without -S SEED, so a rollover does not rebuild the same value set."""
@@ -340,11 +287,12 @@ def gpu_search(rawp, k, outdir, args, rgba, ext, on_hit=None):
     One value set holds only m! orderings (15! = 1.3e12 for K=5). When gpufinder exits 7
     (exhausted), a new job with a fresh random value set is dumped and the search goes on
     with cumulative tried/time counters."""
-    global LAST_ROLLOVER
+    global LAST_ROLLOVER, GPU_FAILED
     gpu = os.path.join(HERE, "gpufinder" + ext)
     fast = os.path.join(HERE, "fastfinder" + ext)
     if not os.path.exists(gpu):
         print("gpufinder not found (build it with build.ps1); falling back to CPU fastfinder", flush=True)
+        GPU_FAILED = True
         return False
     job = os.path.join(outdir, "gpu.job")
     tried_off, time_off, rolls = 0, 0.0, 0
@@ -355,6 +303,7 @@ def gpu_search(rawp, k, outdir, args, rgba, ext, on_hit=None):
             stopped()
         if r.returncode != 0 or not os.path.exists(job):
             print(f"fastfinder --dump-job failed (rc={r.returncode}); falling back to CPU fastfinder", flush=True)
+            GPU_FAILED = True
             return False
         print("gpu mode: gpufinder" if rolls == 0 else f"gpu mode: new value set #{rolls + 1}", flush=True)
         extra = ["--tried-offset", str(tried_off), "--time-offset", f"{time_off:.3f}"] if rolls else []
@@ -373,97 +322,9 @@ def gpu_search(rawp, k, outdir, args, rgba, ext, on_hit=None):
             continue
         if rc != 0:
             print(f"gpufinder failed (rc={rc}, 5 = correctness gate failed); falling back to CPU fastfinder", flush=True)
+            GPU_FAILED = True
             return False
         return True
-
-
-def cmd_search(path, args, unused_only, generic=False, k=6, out=None, gpu=False, watermark=True,
-               all_mode=False, require_fast=False):
-    if require_fast and (generic or unused_only):
-        sys.exit("--fast can't be combined with --generic or --unused-only")
-    orig = load_rgba(path)
-    rgba = bytearray(orig)
-    tail = {(W - k + i, H - 1) for i in range(k)}  # the watermark must not take these
-    tail_ok = not (tail & RESERVED)  # fast mode permutes the RGB of these pixels
-    wm = apply_watermark(rgba, avoid=tail) if watermark else []
-    if watermark:
-        print(f"watermark at {wm}" if wm else "warning: no free unused pixels for the watermark", flush=True)
-    kp = [p for p in knob_pixels(rgba, unused_only) if p not in wm]
-    offs, used = knob_offsets(kp)
-    name = os.path.splitext(os.path.basename(path))[0]
-    outdir = out or os.path.join(HERE, "found", name)
-    os.makedirs(outdir, exist_ok=True)
-    rawp = os.path.join(outdir, "base.raw")
-    with open(rawp, "wb") as f:
-        f.write(raw_scanlines(rgba))
-    print(f"original id {texture_id(mojang_png(orig))}; knob pixels {used}", flush=True)
-    rgba = orig  # hits are verified against the original skin
-    ext = ".exe" if os.name == "nt" else ""
-    kset = set(kp)
-    fast_ok = not generic and tail_ok and all((W - k + i, H - 1) in kset for i in range(k))
-    if require_fast and not fast_ok:
-        bad = [(W - k + i, H - 1) for i in range(k) if (W - k + i, H - 1) not in kset or (W - k + i, H - 1) in RESERVED]
-        sys.exit(f"--fast: fast mode is not possible for this skin. The last {k} pixels must all be "
-                 f"invisible (alpha 0, overlay or unused), but these are not: {bad}")
-
-    def launch(args, on_hit=None):
-        if fast_ok:
-            if gpu:
-                r = gpu_search(rawp, k, outdir, args, rgba, ext, on_hit)
-                if r:
-                    return r
-            cmd = [os.path.join(HERE, "fastfinder" + ext), rawp, str(k), outdir, *args]
-            print(f"fast mode: last {k} pixels", flush=True)
-            rc = run_finder(cmd, rgba, on_hit)
-            if rc != 4:
-                return rc
-            if require_fast:
-                sys.exit("--fast: fastfinder reports this skin's compressed structure is unsupported; "
-                         "run without --fast to use the generic search")
-            print("fastfinder: structure unsupported, falling back to hashfinder", flush=True)
-        elif not generic:
-            if gpu:
-                print("--gpu needs the last pixels to be invisible; ignoring", flush=True)
-            print("last pixels are not all invisible; using generic hashfinder", flush=True)
-        return run_finder([os.path.join(HERE, "hashfinder" + ext), rawp, ",".join(map(str, offs)),
-                           outdir, *args], rgba, on_hit)
-
-    if not all_mode:
-        launch(args)
-        return
-    remaining, rest = split_targets(args)
-    if not remaining:
-        sys.exit("--all needs at least one -p, -s or -z target")
-    found = {}
-    while remaining:
-        print(f"--all: still looking for {', '.join(remaining)}", flush=True)
-        newly, keep, firsts = [], set(), {}
-        before = {f for f in os.listdir(outdir) if f.endswith(".png")}
-
-        def on_hit(why, path):
-            t = hit_target(why, remaining)
-            if t and t not in newly:
-                newly.append(t)
-                keep.add(os.path.basename(path))
-                firsts[t] = os.path.splitext(os.path.basename(path))[0]
-            return bool(newly)
-        r = launch(target_args(remaining) + rest, on_hit)
-        for t in newly:
-            remaining.remove(t)
-            found[t] = firsts[t]
-        # keep the first verified hit per target, drop the rest of the batch
-        extra = {f for f in os.listdir(outdir) if f.endswith(".png")} - before - keep
-        for f in extra:
-            os.remove(os.path.join(outdir, f))
-        if extra:
-            print(f"--all: removed {len(extra)} duplicate hit(s) from the same batch", flush=True)
-        if r != STOPPED_BY_US and not newly:
-            print(f"finder exited (rc={r}) before all targets were found", flush=True)
-            break
-    if not remaining:
-        print("--all: every target found:", flush=True)
-        for t, f in found.items():
-            print(f"  {t:<20} https://textures.minecraft.net/texture/{f}", flush=True)
 
 
 def verify(base_rgba, found_path):
@@ -562,13 +423,187 @@ def verify_namemc(base_rgba, found_path):
     return True, f"https://namemc.com/skin/{want}  mojang https://textures.minecraft.net/texture/{moj}"
 
 
-def cmd_namemc_id(paths):
-    for p in paths:
-        rgba = load_rgba(p)
-        print(f"{namemc_id(rgba)}  {p}  (mojang {texture_id(mojang_png(rgba))})")
+
+# ---- shared helpers ----------------------------------------------------------------------------
+EXT = ".exe" if os.name == "nt" else ""
+SKIN_URL = "https://textures.minecraft.net/texture/"
+NM_URL = "https://namemc.com/skin/"
 
 
-def namemc_search(path, args, unused_only, out, gpu, watermark, all_mode):
+def exe(name):
+    return os.path.join(HERE, name + EXT)
+
+
+def fmt_px(pixels):
+    """[(58,63),...,(63,63)] -> '(58-63, 63)'. Consecutive pixels of one row are joined."""
+    runs = []
+    for x, y in sorted(pixels, key=lambda p: (p[1], p[0])):
+        if runs and runs[-1][2] == y and runs[-1][1] + 1 == x:
+            runs[-1][1] = x
+        else:
+            runs.append([x, x, y])
+    return ", ".join(f"({a}, {y})" if a == b else f"({a}-{b}, {y})" for a, b, y in runs) or "none"
+
+
+def px_state(rgba, p):
+    """Why a pixel is or is not a free knob, in a few words."""
+    base, over = masks()
+    a = rgba[(p[1] * W + p[0]) * 4 + 3]
+    if p in RESERVED:
+        return "reserved (other mods read it)"
+    if p in base:
+        return "base layer (always drawn)"
+    if p in over:
+        return f"overlay with alpha {a}" if a else "overlay, transparent"
+    return f"unused with alpha {a}" if a else "unused, transparent"
+
+
+def target_match(t, shown, full):
+    """Does an id satisfy target 'prefix:x' / 'suffix:x' / 'zeros:N'? shown = id as in the link,
+    full = untrimmed hex digest."""
+    kind, val = t.split(":", 1)
+    if kind == "prefix":
+        return shown.startswith(val)
+    if kind == "suffix":
+        return shown.endswith(val)
+    return len(full) - len(full.lstrip("0")) >= int(val)
+
+
+def first_match(targets, shown, full):
+    return next((t for t in targets if target_match(t, shown, full)), None)
+
+
+def finder_extra(threads, seed, bench=False):
+    out = []
+    if threads:
+        out += ["-t", str(threads)]
+    if seed is not None:
+        out += ["-S", str(seed)]
+    if bench:
+        out.append("-b")
+    return out
+
+
+def search_args(targets, count, every, extra, bench=False):
+    """The finder's own flags for the parsed options. --every-target stops by itself, so no -n."""
+    a = target_args(targets)
+    if not every and not bench:
+        a += ["-n", str(count)]
+    return a + extra
+
+
+def run_targets(launch, targets, extra, outdir, url_prefix):
+    """--every-target: run until every target has a verified hit. Restarts without the targets
+    already found. Returns {target: path of its first hit}."""
+    remaining = list(targets)
+    found = {}
+    while remaining:
+        print(f"every-target: still looking for {', '.join(remaining)}", flush=True)
+        newly, keep, firsts = [], set(), {}
+        before = {f for f in os.listdir(outdir) if f.endswith(".png")}
+
+        def on_hit(why, path):
+            t = hit_target(why, remaining)
+            if t and t not in newly:
+                newly.append(t)
+                keep.add(os.path.basename(path))
+                firsts[t] = path
+            return bool(newly)
+        r = launch(target_args(remaining) + extra, on_hit)
+        for t in newly:
+            remaining.remove(t)
+            found[t] = firsts[t]
+        # keep the first verified hit per target, drop the rest of the batch
+        dup = {f for f in os.listdir(outdir) if f.endswith(".png")} - before - keep
+        for f in dup:
+            os.remove(os.path.join(outdir, f))
+        if dup:
+            print(f"every-target: removed {len(dup)} duplicate hit(s) from the same batch", flush=True)
+        if r != STOPPED_BY_US and not newly:
+            print(f"finder exited (rc={r}) before all targets were found", flush=True)
+            break
+    if not remaining:
+        print("every-target: every target found:", flush=True)
+        for t, p in found.items():
+            print(f"  {t:<20} {url_prefix}{os.path.splitext(os.path.basename(p))[0]}", flush=True)
+    return found
+
+
+# ---- Mojang search -----------------------------------------------------------------------------
+def mojang_search(path, targets, count=1, every=False, engine="auto", no_generic=False,
+                  unused_only=False, k=6, out=None, watermark=True, threads=None, seed=None, bench=False):
+    """Search for Mojang texture ids. Returns the verified hit files (first hit per target with
+    every=True)."""
+    orig = load_rgba(path)
+    rgba = bytearray(orig)
+    tail_px = [(W - k + i, H - 1) for i in range(k)]
+    wm = apply_watermark(rgba, avoid=set(tail_px)) if watermark else []  # the watermark must not take the tail
+    if watermark:
+        print(f"watermark at {wm}" if wm else "warning: no free unused pixels for the watermark", flush=True)
+    kp = [p for p in knob_pixels(rgba, unused_only) if p not in wm]
+    offs, used = knob_offsets(kp)
+    name = os.path.splitext(os.path.basename(path))[0]
+    outdir = out or os.path.join(HERE, "found", name)
+    os.makedirs(outdir, exist_ok=True)
+    rawp = os.path.join(outdir, "base.raw")
+    with open(rawp, "wb") as f:
+        f.write(raw_scanlines(rgba))
+    print(f"original id {texture_id(mojang_png(orig))}; knob pixels {used}", flush=True)
+
+    kset = set(kp)  # reserved pixels are never in it
+    bad = [p for p in tail_px if p not in kset]
+    if engine == "generic":
+        mode, why = "generic", "--engine generic"
+    elif bad:
+        mode = "generic"
+        why = (f"the last {k} pixels are not all invisible: "
+               + "; ".join(f"({x},{y}) {px_state(rgba, (x, y))}" for x, y in bad[:3]))
+        if no_generic:
+            sys.exit(f"fast mode is not possible for this skin and --no-generic forbids the generic search. {why}")
+    elif engine == "cpu":
+        mode, why = "cpu", "--engine cpu"
+    elif engine == "gpu":
+        mode, why = "gpu", "--engine gpu"
+    elif os.path.exists(exe("gpufinder")):
+        mode, why = "gpu", "gpufinder found, last pixels invisible"
+    else:
+        mode, why = "cpu", "gpufinder not built, last pixels invisible"
+    label = {"gpu": "gpu (gpufinder)", "cpu": f"cpu fast mode (last {k} pixels)", "generic": "generic (hashfinder)"}[mode]
+    print(f"engine: {label} - {why}", flush=True)
+
+    def launch(fargs, on_hit=None):
+        if mode in ("gpu", "cpu"):
+            if mode == "gpu":
+                r = gpu_search(rawp, k, outdir, fargs, orig, EXT, on_hit)
+                if r:
+                    return r
+            print(f"fast mode: last {k} pixels", flush=True)
+            rc = run_finder([exe("fastfinder"), rawp, str(k), outdir, *fargs], orig, on_hit)
+            if rc != 4:
+                return rc
+            if no_generic:
+                sys.exit("fastfinder reports this skin's compressed structure is unsupported; "
+                         "drop --no-generic to use the generic search")
+            print("fastfinder: structure unsupported, falling back to hashfinder", flush=True)
+        return run_finder([exe("hashfinder"), rawp, ",".join(map(str, offs)), outdir, *fargs], orig, on_hit)
+
+    extra = finder_extra(threads, seed, bench)
+    if bench or not every:
+        hits = []
+
+        def collect(why_, p):
+            hits.append(p)
+            return False
+        launch(search_args(targets, count, every, extra, bench), collect)
+        return hits
+    return list(run_targets(launch, targets, extra, outdir, SKIN_URL).values())
+
+
+# ---- NameMC search -----------------------------------------------------------------------------
+def namemc_search(path, targets, count=1, every=False, engine="auto", unused_only=False, out=None,
+                  watermark=True, threads=None, seed=None, bench=False):
+    """Search for NameMC ids. Returns the verified hit files (first hit per target with every=True)."""
+    global GPU_FAILED
     orig = load_rgba(path)
     rgba = bytearray(orig)
     wm = apply_watermark(rgba, avoid=MOJANG_TAIL) if watermark else []
@@ -590,16 +625,25 @@ def namemc_search(path, args, unused_only, out, gpu, watermark, all_mode):
     kopt = ",".join(f"{x},{y}" for x, y in knobs)
     print(f"original NameMC id {namemc_id(orig)}; knob pixels {knobs} (alpha 1); "
           f"{len(elig)} eligible", flush=True)
-    ext = ".exe" if os.name == "nt" else ""
-    cpu = os.path.join(HERE, "namemcfinder" + ext)
-    gpuexe = os.path.join(HERE, "namemcgpu" + ext)
+    cpu, gpuexe = exe("namemcfinder"), exe("namemcgpu")
     if not os.path.exists(cpu):
         sys.exit("namemcfinder not found (build it with build.ps1)")
+    if engine == "cpu":
+        use_gpu, why = False, "--engine cpu"
+    elif engine == "gpu":
+        use_gpu, why = True, "--engine gpu"
+    elif os.path.exists(gpuexe):
+        use_gpu, why = True, "namemcgpu found"
+    else:
+        use_gpu, why = False, "namemcgpu not built"
+    print(f"engine: {'gpu (namemcgpu)' if use_gpu else 'cpu (namemcfinder)'} - {why}", flush=True)
 
     def launch(fargs, on_hit=None):
-        if gpu:
+        global GPU_FAILED
+        if use_gpu:
             if not os.path.exists(gpuexe):
                 print("namemcgpu not found (build it with build.ps1); falling back to CPU", flush=True)
+                GPU_FAILED = True
             else:
                 print("gpu mode: namemcgpu", flush=True)
                 rc = run_finder([gpuexe, rgbap, outdir, "-k", kopt, "--render-exe", cpu, *fargs],
@@ -607,93 +651,514 @@ def namemc_search(path, args, unused_only, out, gpu, watermark, all_mode):
                 if rc in (0, STOPPED_BY_US):
                     return rc
                 print(f"namemcgpu failed (rc={rc}, 5 = correctness gate failed); falling back to CPU", flush=True)
+                GPU_FAILED = True
         print("cpu mode: namemcfinder", flush=True)
         return run_finder([cpu, rgbap, outdir, "-k", kopt, *fargs], orig, on_hit, verify_namemc)
 
-    if not all_mode:
-        launch(args)
-        return
-    remaining, rest = split_targets(args)
-    if not remaining:
-        sys.exit("--all needs at least one -p, -s or -z target")
-    found = {}
-    while remaining:
-        print(f"--all: still looking for {', '.join(remaining)}", flush=True)
-        newly, keep, firsts = [], set(), {}
-        before = {f for f in os.listdir(outdir) if f.endswith(".png")}
+    extra = finder_extra(threads, seed, bench)
+    if bench or not every:
+        hits = []
 
-        def on_hit(why, p):
-            t = hit_target(why, remaining)
-            if t and t not in newly:
-                newly.append(t)
-                keep.add(os.path.basename(p))
-                firsts[t] = os.path.splitext(os.path.basename(p))[0]
-            return bool(newly)
-        r = launch(target_args(remaining) + rest, on_hit)
-        for t in newly:
-            remaining.remove(t)
-            found[t] = firsts[t]
-        extra = {f for f in os.listdir(outdir) if f.endswith(".png")} - before - keep
-        for f in extra:
-            os.remove(os.path.join(outdir, f))
-        if extra:
-            print(f"--all: removed {len(extra)} duplicate hit(s) from the same batch", flush=True)
-        if r != STOPPED_BY_US and not newly:
-            print(f"finder exited (rc={r}) before all targets were found", flush=True)
-            break
-    if not remaining:
-        print("--all: every target found:", flush=True)
-        for t, f in found.items():
-            print(f"  {t:<20} https://namemc.com/skin/{f}", flush=True)
+        def collect(why_, p):
+            hits.append(p)
+            return False
+        launch(search_args(targets, count, every, extra, bench), collect)
+        return hits
+    return list(run_targets(launch, targets, extra, outdir, NM_URL).values())
 
 
-def main():
-    a = sys.argv[1:]
-    unused_only = "--unused-only" in a
-    a = [x for x in a if x != "--unused-only"]
-    generic = "--generic" in a
-    a = [x for x in a if x != "--generic"]
-    gpu = "--gpu" in a
-    a = [x for x in a if x != "--gpu"]
-    watermark = "--no-watermark" not in a
-    a = [x for x in a if x != "--no-watermark"]
-    all_mode = "--all" in a
-    a = [x for x in a if x != "--all"]
-    require_fast = "--fast" in a
-    a = [x for x in a if x != "--fast"]
-    k = 6
-    out = None
-    if "--out" in a:
-        i = a.index("--out")
-        out = os.path.abspath(a[i + 1])
-        del a[i:i + 2]
-    if "--k" in a:
-        i = a.index("--k")
-        k = int(a[i + 1])
-        del a[i:i + 2]
-    if len(a) >= 2 and a[0] == "predict":
-        cmd_predict(a[1])
-    elif len(a) >= 2 and a[0] == "knobs":
-        cmd_knobs(a[1], unused_only)
-    elif len(a) >= 2 and a[0] == "search":
-        cmd_search(a[1], a[2:], unused_only, generic, k, out, gpu, watermark, all_mode, require_fast)
-    elif len(a) >= 2 and a[0] == "namemc":
-        namemc_search(a[1], a[2:], unused_only, out, gpu, watermark, all_mode)
-    elif len(a) >= 2 and a[0] == "namemc-id":
-        cmd_namemc_id(a[1:])
-    elif len(a) >= 2 and a[0] == "detect":
-        cmd_detect(a[1:])
-    elif len(a) == 3 and a[0] == "verify":
-        ok, msg = verify(load_rgba(a[1]), a[2])
-        print("OK" if ok else "FAIL", msg)
-        sys.exit(0 if ok else 1)
+# ---- other commands ----------------------------------------------------------------------------
+def fetch_skin(t):
+    """(bytes, label) of a file, a texture id or a textures.minecraft.net URL. ValueError on failure."""
+    if os.path.exists(t):
+        return open(t, "rb").read(), t
+    import urllib.request
+    tid = t.rstrip("/").rsplit("/", 1)[-1].lower()
+    if not re.fullmatch(r"[0-9a-f]{1,64}", tid):
+        raise ValueError(f"{t}: not a file, a texture id or a textures.minecraft.net URL")
+    url = SKIN_URL + tid
+    try:
+        return urllib.request.urlopen(url, timeout=20).read(), url
+    except OSError as e:
+        raise ValueError(f"{url}: download failed ({e})")
+
+
+def decode_skin(data, label):
+    import io
+    try:
+        im = Image.open(io.BytesIO(data))
+        im.load()
+    except Exception as e:
+        raise ValueError(f"{label}: not an image ({e})")
+    if im.size != (W, H):
+        raise ValueError(f"{label}: not a 64x64 skin ({im.size[0]}x{im.size[1]})")
+    return bytearray(im.convert("RGBA").tobytes())
+
+
+def cmd_detect(args):
+    bad = 0
+    for t in args.inputs:
+        try:
+            data, label = fetch_skin(t)
+            rgba = decode_skin(data, label)
+        except ValueError as e:
+            print(f"error: {e}", file=sys.stderr)
+            bad = 1
+            continue
+        f = find_watermark(rgba)
+        print(f"{'YES' if f else 'no '}  {label}" + (f" (watermark v{f[0]} at {f[1]})" if f else ""))
+    return bad
+
+
+def cmd_ids(args):
+    bad = 0
+    for t in args.inputs:
+        try:
+            data, label = fetch_skin(t)
+            rgba = decode_skin(data, label)
+        except ValueError as e:
+            print(f"error: {e}", file=sys.stderr)
+            bad = 1
+            continue
+        moj, nm = texture_id(mojang_png(rgba)), namemc_id(rgba)
+        if args.legacy == "predict":
+            print(moj)
+        elif args.legacy == "namemc-id":
+            print(f"{nm}  {label}  (mojang {moj})")
+        else:
+            print(label)
+            print(f"  Mojang  {moj}  {SKIN_URL}{moj}")
+            print(f"  NameMC  {nm}  {NM_URL}{nm}")
+    return bad
+
+
+def cmd_verify(args):
+    ok, msg = verify(load_rgba(args.original), args.result)
+    print("OK" if ok else "FAIL", msg)
+    return 0 if ok else 1
+
+
+def cmd_pixels(args):
+    path, k = args.skin, args.tail_pixels
+    orig = load_rgba(path)
+    print(f"{path}: Mojang id {texture_id(mojang_png(orig))}, NameMC id {namemc_id(orig)}")
+    rgba = bytearray(orig)
+    tail = [(W - k + i, H - 1) for i in range(k)]
+    wm = apply_watermark(rgba, avoid=set(tail))
+    kset = {p for p in knob_pixels(rgba, False) if p not in wm}
+    bad = [p for p in tail if p not in kset]
+
+    def generic(unused_only):
+        kp = [p for p in knob_pixels(rgba, unused_only) if p not in wm]
+        try:
+            return fmt_px(knob_offsets(kp)[1]) + "  (3 pixels, 64-bit counter in RGB)"
+        except SystemExit as e:
+            return f"not possible: {e}"
+    print("\nwatermark (every mode; RGB of 6 transparent unused pixels)")
+    found = find_watermark(orig)
+    print("  " + (fmt_px(wm) if wm else "no free unused pixels")
+          + (f"  (the skin already carries watermark v{found[0]})" if found else ""))
+    print("\nmojang (RGB under alpha 0 changes, alpha stays)")
+    print(f"  fast, GPU       last K <= {k} pixels, usually {k - 1}: {fmt_px(tail[1:])}")
+    print(f"  fast, CPU       last {k} pixels: {fmt_px(tail)}")
+    print(f"  generic         {generic(False)}")
+    print(f"  --unused-only   {generic(True)}   (never drawn)")
+    if bad:
+        print("  fast mode       not eligible: "
+              + "; ".join(f"({x},{y}) {px_state(rgba, (x, y))}" for x, y in bad))
     else:
-        print(__doc__)
-        sys.exit(1)
+        print(f"  fast mode       eligible: all {k} tail pixels are invisible")
+    print("\nnamemc (3 pixels get alpha 1 and a counter as RGB)")
+    for label, uo in (("default", False), ("--unused-only", True)):
+        try:
+            nk, elig = namemc_knob_pixels(rgba, uo, avoid=set(wm))
+            print(f"  {label:<15} {fmt_px(nk)}   ({len(elig)} eligible)")
+        except SystemExit as e:
+            print(f"  {label:<15} not possible: {e}")
+    return 0
+
+
+def cmd_bench(args):
+    global LAST_RATE, GPU_FAILED
+    skin = args.skin
+    gpu_here = os.path.exists(exe("gpufinder")) and os.path.exists(exe("namemcgpu"))
+    engines = [args.engine] if args.engine else (["gpu", "cpu"] if gpu_here else ["cpu"])
+    if "gpu" in engines and not gpu_here:
+        sys.exit("--engine gpu: gpufinder.exe / namemcgpu.exe not built (build.ps1 needs CUDA)")
+    if not args.engine and not gpu_here:
+        print("note: no CUDA build found, benchmarking the CPU only", flush=True)
+    results = []
+    with tempfile.TemporaryDirectory(prefix="skinhash_bench_") as tmp:
+        for eng in engines:
+            for mode in ("mojang", "namemc"):
+                print(f"\n== {mode} / {eng} (10 s, nothing is saved)", flush=True)
+                LAST_RATE, GPU_FAILED = None, False
+                d = os.path.join(tmp, f"{mode}_{eng}")
+                if mode == "mojang":
+                    mojang_search(skin, [], engine=eng, no_generic=True, out=d, threads=args.threads,
+                                  seed=args.seed, bench=True)
+                else:
+                    namemc_search(skin, [], engine=eng, out=d, threads=args.threads, seed=args.seed, bench=True)
+                results.append((mode, eng, LAST_RATE, GPU_FAILED))
+    print(f"\nbenchmark on {skin}")
+    for mode, eng, rate, failed in results:
+        r = f"{rate:.3e} candidates/s" if rate else "no rate reported"
+        print(f"  {mode:<7} {eng:<4} {r}" + ("  (GPU failed, this is the CPU)" if failed else ""))
+    return 0
+
+
+def targets_from(prefix, suffix, zeros):
+    return ([f"prefix:{p}" for p in prefix or []] + [f"suffix:{s}" for s in suffix or []]
+            + [f"zeros:{z}" for z in zeros or []])
+
+
+def check_search_options(parser, args, has_target,
+                         hint="use -p/--prefix, -s/--suffix or -z/--zeros"):
+    if not has_target:
+        parser.error("no target given: " + hint)
+    if getattr(args, "no_generic", False) and args.engine == "generic":
+        parser.error("--no-generic conflicts with --engine generic")
+    if args.unused_only and (args.engine in ("gpu", "cpu") or getattr(args, "no_generic", False)):
+        parser.error("--unused-only can't be combined with the fast modes (--engine gpu/cpu, --no-generic): "
+                     "they use pixels that --unused-only excludes")
+
+
+def default_out(args, suffix=""):
+    if args.out:
+        return os.path.abspath(args.out)
+    return os.path.join(HERE, "found", os.path.splitext(os.path.basename(args.skin))[0] + suffix)
+
+
+def cmd_mojang(args):
+    targets = targets_from(args.prefix, args.suffix, args.zeros)
+    check_search_options(args.parser, args, bool(targets))
+    mojang_search(args.skin, targets, args.count, args.every_target, args.engine, args.no_generic,
+                  args.unused_only, args.tail_pixels, default_out(args), not args.no_watermark,
+                  args.threads, args.seed)
+    return 0
+
+
+def cmd_namemc(args):
+    targets = targets_from(args.prefix, args.suffix, args.zeros)
+    check_search_options(args.parser, args, bool(targets))
+    namemc_search(args.skin, targets, args.count, args.every_target, args.engine, args.unused_only,
+                  default_out(args, "_namemc"), not args.no_watermark, args.threads, args.seed)
+    return 0
+
+
+def cmd_both(args):
+    nm_t = targets_from(args.namemc_prefix, args.namemc_suffix, args.namemc_zeros)
+    mj_t = targets_from(args.mojang_prefix, args.mojang_suffix, args.mojang_zeros)
+    check_search_options(args.parser, args, bool(nm_t or mj_t),
+                         "use --namemc-prefix/-suffix/-zeros and/or --mojang-prefix/-suffix/-zeros")
+    outdir = default_out(args, "_both")
+    orig = load_rgba(args.skin)
+    wm = not args.no_watermark
+    total = bool(nm_t) + bool(mj_t)
+    step = 0
+    nm_file = None
+    if nm_t:
+        step += 1
+        print(f"== phase {step}/{total}: NameMC {', '.join(nm_t)}", flush=True)
+        # generic only exists for Mojang; the NameMC phase then uses the CPU finder
+        hits = namemc_search(args.skin, nm_t, 1, args.every_target,
+                             "cpu" if args.engine == "generic" else args.engine,
+                             args.unused_only, outdir, wm, args.threads, args.seed)
+        if not hits:
+            sys.exit("phase 1 (NameMC) ended without a verified hit")
+        nm_file = hits[0]
+        print(f"== phase {step}/{total} done: {NM_URL}{os.path.splitext(os.path.basename(nm_file))[0]}"
+              + (f" (first of {len(hits)} hits, used as the base)" if len(hits) > 1 else ""), flush=True)
+    finals = [nm_file]
+    if mj_t:
+        step += 1
+        print(f"== phase {step}/{total}: Mojang {', '.join(mj_t)}" + (" on that hit" if nm_file else ""), flush=True)
+        finals = mojang_search(nm_file or args.skin, mj_t, args.count, args.every_target, args.engine,
+                               args.no_generic, args.unused_only, args.tail_pixels, outdir, wm,
+                               args.threads, args.seed)
+        if not finals:
+            sys.exit(f"phase {step} (Mojang) ended without a verified hit")
+        print(f"== phase {step}/{total} done", flush=True)
+
+    print("\n== result", flush=True)
+    bad = 0
+    for f in finals:
+        data = open(f, "rb").read()
+        nm, full = namemc_id(load_rgba(f)), hashlib.sha256(data).hexdigest()
+        moj = full.lstrip("0") or "0"
+        ok, msg = (verify if mj_t else verify_namemc)(orig, f)
+        print(f"file     {f}")
+        print(f"NameMC   {NM_URL}{nm}")
+        print(f"Mojang   {SKIN_URL}{moj}")
+        checks = []
+        if nm_t:
+            m = first_match(nm_t, nm, nm)
+            checks.append(f"NameMC id matches {m}" if m else "NameMC id matches NO target")
+            bad += not m
+        if mj_t:
+            m = first_match(mj_t, moj, full)
+            checks.append(f"Mojang id matches {m}" if m else "Mojang id matches NO target")
+            bad += not m
+        print(f"verify   {'OK' if ok else 'FAIL'} against the original skin ({args.skin}); "
+              + "; ".join(checks) + ("" if ok else f" [{msg}]"), flush=True)
+        bad += not ok
+    return 1 if bad else 0
+
+
+# ---- command line ------------------------------------------------------------------------------
+def hex_arg(s):
+    if not re.fullmatch(r"[0-9a-fA-F]+", s):
+        raise argparse.ArgumentTypeError(f"'{s}' is not hex (use the digits 0-9 and a-f)")
+    if len(s) > 16:
+        raise argparse.ArgumentTypeError(f"'{s}' is too long (at most 16 hex digits)")
+    return s.lower()
+
+
+def mojang_hex(s):
+    s = hex_arg(s)
+    if s[0] == "0":
+        rest = s.lstrip("0")
+        hint = f"-z {len(s) - len(rest)} -p {rest}" if rest else f"-z {len(s)}"
+        raise argparse.ArgumentTypeError(
+            f"Mojang prefix '{s}' starts with 0, but the link drops leading zeros; use --zeros N ({hint})")
+    return s
+
+
+def int_range(lo, hi=None):
+    def conv(s):
+        try:
+            n = int(s)
+        except ValueError:
+            raise argparse.ArgumentTypeError(f"'{s}' is not a number")
+        if n < lo or (hi is not None and n > hi):
+            raise argparse.ArgumentTypeError(f"{n} is out of range ({lo}-{hi if hi is not None else 'any'})")
+        return n
+    return conv
+
+
+class Deprecated(argparse.Action):
+    """A hidden old flag: prints a note on stderr and sets the new option."""
+    def __init__(self, option_strings, dest, new=None, **kw):
+        self.new = new
+        super().__init__(option_strings, dest, default=argparse.SUPPRESS, help=argparse.SUPPRESS, **kw)
+
+    def __call__(self, parser, ns, values, option_string=None):
+        print(f"note: {option_string} is deprecated; use {self.new}", file=sys.stderr)
+        setattr(ns, self.dest, self.const if self.nargs == 0 else values)
+
+
+DEPRECATED_COMMANDS = {"search": "mojang", "predict": "ids", "namemc-id": "ids", "knobs": "pixels"}
+
+
+def add_deprecated(g, kind):
+    """The old flags that still work for a search command."""
+    g.add_argument("--gpu", action=Deprecated, dest="engine", nargs=0, const="gpu", new="--engine gpu")
+    g.add_argument("--all", action=Deprecated, dest="every_target", nargs=0, const=True, new="--every-target")
+    if kind == "mojang":
+        g.add_argument("--generic", action=Deprecated, dest="engine", nargs=0, const="generic", new="--engine generic")
+        g.add_argument("--fast", action=Deprecated, dest="no_generic", nargs=0, const=True, new="--no-generic")
+        g.add_argument("--k", action=Deprecated, dest="tail_pixels", type=int_range(1, 20), new="--tail-pixels")
+
+
+def add_skin(p):
+    p.add_argument("skin", metavar="SKIN", help="the skin PNG, 64x64 (e.g. skins/steve.png)")
+
+
+def add_targets(p, kind):
+    g = p.add_argument_group("Targets (at least one; a hit matches any of them)")
+    if kind == "mojang":
+        g.add_argument("-p", "--prefix", metavar="HEX", type=mojang_hex, action="append",
+                       help="link id starts with HEX (up to 16 digits, may not start with 0: use --zeros). Repeatable.")
+        g.add_argument("-z", "--zeros", metavar="N", type=int_range(1, 64), action="append",
+                       help="at least N leading zero digits (the shortest links). Repeatable.")
+    else:
+        g.add_argument("-p", "--prefix", metavar="HEX", type=hex_arg, action="append",
+                       help="NameMC id starts with HEX (up to 16 digits; may start with 0, the id is 16 digits wide). Repeatable.")
+        g.add_argument("-z", "--zeros", metavar="N", type=int_range(1, 16), action="append",
+                       help="at least N leading zero digits of the 16-digit id. Repeatable.")
+    g.add_argument("-s", "--suffix", metavar="HEX", type=hex_arg, action="append",
+                   help="id ends with HEX (up to 16 digits). Repeatable.")
+
+
+def add_stopping(p, both=False):
+    g = p.add_argument_group("Stopping")
+    g.add_argument("-n", "--count", metavar="N", type=int_range(1), default=1,
+                   help="stop after N verified hits (default 1)"
+                   + (" in the Mojang phase; the NameMC phase stops at its first hit" if both else ""))
+    g.add_argument("--every-target", action="store_true",
+                   help="keep searching until every target has a hit, keeping the first hit per target (-n is ignored)"
+                   + ("; applies to both phases, the first NameMC hit is the base" if both else ""))
+
+
+def add_engine(p, kind):
+    g = p.add_argument_group("Engine")
+    if kind == "namemc":
+        g.add_argument("--engine", choices=["auto", "gpu", "cpu"], default="auto",
+                       help="auto (default): namemcgpu if built and it passes its self-check, else namemcfinder on the CPU. "
+                       "gpu, cpu: prefer that engine.")
+        return
+    if kind == "mojang":
+        g.add_argument("--engine", choices=["auto", "gpu", "cpu", "generic"], default="auto",
+                       help="auto (default): GPU if gpufinder is built and passes its self-check, else CPU fast mode, "
+                       "else the ~300x slower generic search. gpu, cpu: prefer that fast engine. "
+                       "generic: hashfinder only.")
+    else:
+        g.add_argument("--engine", choices=["auto", "gpu", "cpu", "generic"], default="auto",
+                       help="as for the mojang and namemc commands. generic only affects the Mojang phase "
+                       "(the NameMC phase then uses the CPU).")
+    g.add_argument("--no-generic", action="store_true",
+                   help="never fall back to the slow generic search; stop with the reason instead")
+
+
+def add_pixels(p, kind):
+    g = p.add_argument_group("Pixels")
+    g.add_argument("--unused-only", action="store_true",
+                   help="only use pixels no model face ever samples (never drawn, so certainly invisible). "
+                   "Much slower; incompatible with the Mojang fast modes.")
+    if kind != "namemc":
+        g.add_argument("--tail-pixels", metavar="N", type=int_range(1, 20), default=6,
+                       help="pixels at the end of the file that Mojang fast mode permutes (default 6). With the GPU "
+                       "it is an upper bound: the largest K <= N that gives a one-block SHA is used.")
+    g.add_argument("--no-watermark", action="store_true", help="do not add the invisible skinhash watermark")
+
+
+def add_output(p, default):
+    g = p.add_argument_group("Output")
+    g.add_argument("-o", "--out", metavar="DIR", help=f"output directory (default {default})")
+
+
+def add_advanced(p):
+    g = p.add_argument_group("Advanced")
+    g.add_argument("--threads", metavar="N", type=int_range(1), help="CPU threads (default: all; the GPU ignores it)")
+    g.add_argument("--seed", metavar="N", type=int_range(0), help="start seed of the search (default: random)")
+
+
+def build_parser():
+    top = argparse.ArgumentParser(
+        prog="py skinhash.py", allow_abbrev=False,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description="Find invisible variations of a Minecraft skin whose Mojang texture id and/or NameMC id looks cool.",
+        epilog="examples:\n"
+               "  py skinhash.py mojang skins/steve.png -p c0ffee\n"
+               "  py skinhash.py both skins/steve.png --namemc-prefix beef --mojang-prefix cafe\n"
+               "  py skinhash.py verify skins/steve.png found/steve/<id>.png\n\n"
+               "Run 'py skinhash.py COMMAND --help' for the options of one command.\n"
+               "Old names (search, predict, namemc-id, knobs, --gpu, --generic, --fast, --all, --k) still work\n"
+               "and print a note.")
+    sub = top.add_subparsers(dest="command", metavar="COMMAND", title="commands", required=True)
+
+    def command(name, summary, epilog):
+        p = sub.add_parser(name, help=summary, description=summary, allow_abbrev=False,
+                           formatter_class=argparse.RawDescriptionHelpFormatter, epilog="examples:\n" + epilog)
+        p.set_defaults(parser=p)
+        return p
+
+    p = command("mojang", "Search for a Mojang texture link (textures.minecraft.net/texture/...) that looks cool.",
+                "  py skinhash.py mojang skins/steve.png -p c0ffee\n"
+                "  py skinhash.py mojang skins/steve.png -z 9 -n 3 -o out/steve\n"
+                "  py skinhash.py mojang skins/steve.png -s dead --engine cpu --no-generic")
+    add_skin(p)
+    add_targets(p, "mojang")
+    add_stopping(p)
+    add_engine(p, "mojang")
+    add_pixels(p, "mojang")
+    add_output(p, "found/<skin>/")
+    add_advanced(p)
+    add_deprecated(p, "mojang")
+    p.set_defaults(func=cmd_mojang)
+
+    p = command("namemc", "Search for a NameMC skin page (namemc.com/skin/...) whose id looks cool.",
+                "  py skinhash.py namemc skins/steve.png -p beef\n"
+                "  py skinhash.py namemc skins/steve.png -z 6 -n 3\n"
+                "  py skinhash.py namemc skins/steve.png -p dead -s cafe --every-target --engine cpu")
+    add_skin(p)
+    add_targets(p, "namemc")
+    add_stopping(p)
+    add_engine(p, "namemc")
+    add_pixels(p, "namemc")
+    add_output(p, "found/<skin>_namemc/")
+    add_advanced(p)
+    add_deprecated(p, "namemc")
+    p.set_defaults(func=cmd_namemc)
+
+    p = command("both", "Search for a NameMC id and a Mojang texture id on one skin: NameMC first, then Mojang on that hit.",
+                "  py skinhash.py both skins/steve.png --namemc-prefix beef --mojang-prefix cafe\n"
+                "  py skinhash.py both skins/steve.png --namemc-zeros 6 --mojang-zeros 9\n"
+                "  py skinhash.py both skins/steve.png --mojang-prefix c0ffee     (only the Mojang phase)")
+    add_skin(p)
+    g = p.add_argument_group("NameMC targets (phase 1; fixed 16 digits, prefixes may start with 0)")
+    g.add_argument("--namemc-prefix", metavar="HEX", type=hex_arg, action="append", help="NameMC id starts with HEX. Repeatable.")
+    g.add_argument("--namemc-suffix", metavar="HEX", type=hex_arg, action="append", help="NameMC id ends with HEX. Repeatable.")
+    g.add_argument("--namemc-zeros", metavar="N", type=int_range(1, 16), action="append", help="at least N leading zero digits. Repeatable.")
+    g = p.add_argument_group("Mojang targets (phase 2; run on the phase 1 hit)")
+    g.add_argument("--mojang-prefix", metavar="HEX", type=mojang_hex, action="append", help="link id starts with HEX (may not start with 0: use --mojang-zeros). Repeatable.")
+    g.add_argument("--mojang-suffix", metavar="HEX", type=hex_arg, action="append", help="link id ends with HEX. Repeatable.")
+    g.add_argument("--mojang-zeros", metavar="N", type=int_range(1, 64), action="append", help="at least N leading zero digits. Repeatable.")
+    add_stopping(p, both=True)
+    add_engine(p, "both")
+    add_pixels(p, "both")
+    add_output(p, "found/<skin>_both/")
+    add_advanced(p)
+    p.set_defaults(func=cmd_both)
+
+    p = command("ids", "Print the Mojang texture id and the NameMC id of skins, with both links.",
+                "  py skinhash.py ids skins/steve.png\n"
+                "  py skinhash.py ids found/steve/<id>.png\n"
+                "  py skinhash.py ids https://textures.minecraft.net/texture/<id>")
+    p.add_argument("inputs", metavar="FILE|ID|URL", nargs="+",
+                   help="skin PNG files, or Mojang texture ids / textures.minecraft.net URLs (downloaded)")
+    p.set_defaults(func=cmd_ids)
+
+    p = command("verify", "Check that RESULT looks identical to ORIGINAL in game and hashes to its file name.",
+                "  py skinhash.py verify skins/steve.png found/steve/<id>.png\n"
+                "  py skinhash.py verify skins/steve.png found/steve_both/<id>.png     (also NameMC and both results)")
+    p.add_argument("original", metavar="ORIGINAL", help="the skin you started from")
+    p.add_argument("result", metavar="RESULT", help="a hit file, named <id>.png")
+    p.set_defaults(func=cmd_verify)
+
+    p = command("detect", "Check whether skins were made by skinhash (the invisible watermark).",
+                "  py skinhash.py detect found/steve/<id>.png\n"
+                "  py skinhash.py detect https://textures.minecraft.net/texture/<id>")
+    p.add_argument("inputs", metavar="FILE|ID|URL", nargs="+",
+                   help="skin PNG files, or Mojang texture ids / URLs (downloaded)")
+    p.set_defaults(func=cmd_detect)
+
+    p = command("pixels", "Show which pixels each search mode would change on a skin, and whether fast mode is possible.",
+                "  py skinhash.py pixels skins/steve.png\n"
+                "  py skinhash.py pixels skins/me.png --tail-pixels 5")
+    add_skin(p)
+    p.add_argument("--tail-pixels", metavar="N", type=int_range(1, 20), default=6,
+                   help="size of the fast-mode tail to check (default 6)")
+    p.add_argument("--unused-only", action="store_true", help=argparse.SUPPRESS)  # old 'knobs' flag; both variants are shown
+    p.set_defaults(func=cmd_pixels)
+
+    p = command("bench", "Run the 10 s benchmark of the search engines and print candidates per second. Saves nothing.",
+                "  py skinhash.py bench\n"
+                "  py skinhash.py bench --engine gpu\n"
+                "  py skinhash.py bench skins/me.png --engine cpu --threads 8")
+    p.add_argument("skin", metavar="SKIN", nargs="?", default=os.path.join(HERE, "skins", "steve.png"),
+                   help="skin to benchmark on (default skins/steve.png)")
+    p.add_argument("--engine", choices=["gpu", "cpu"],
+                   help="benchmark only this engine (default: GPU if built, then CPU). Runs the Mojang and the NameMC search.")
+    add_advanced(p)
+    p.set_defaults(func=cmd_bench)
+    return top
+
+
+def main(argv=None):
+    argv = list(sys.argv[1:] if argv is None else argv)
+    legacy = None
+    if argv and argv[0] in DEPRECATED_COMMANDS:
+        legacy = argv[0]
+        argv[0] = DEPRECATED_COMMANDS[legacy]
+        print(f"note: '{legacy}' is deprecated; use '{argv[0]}'", file=sys.stderr)
+    args = build_parser().parse_args(argv)
+    args.legacy = legacy
+    return args.func(args)
 
 
 if __name__ == "__main__":
     try:
-        main()
+        sys.exit(main())
     except KeyboardInterrupt:
         stopped()

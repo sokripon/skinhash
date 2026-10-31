@@ -32,16 +32,17 @@ invisible variations until one hashes to something you like: a hex word at the s
 | Mode | Pixels changed | Coordinates on the example skin (Steve) |
 |---|---|---|
 | Watermark (every mode) | 6 unused transparent pixels; RGB spells `sokripon skinhash` + version byte `0x03` | (0, 7)–(5, 7), unused corner of the head layout (v2 used (0, 0)–(5, 0), which Mine Little Pony reads) |
-| GPU fast mode (`--gpu`) | the last 5 pixels of the file, as long as they are invisible | (59–63, 63), end of the left sleeve overlay |
-| CPU fast mode (default) | the last 6 pixels of the file, as long as they are invisible | (58–63, 63), end of the left sleeve overlay |
-| Generic mode (`--generic`, or when the last pixels are visible) | a 64-bit counter in the RGB of the last 3 invisible pixels found | (61–63, 63) |
+| GPU fast mode (`--engine gpu`, or auto) | the last 5 pixels of the file, as long as they are invisible | (59–63, 63), end of the left sleeve overlay |
+| CPU fast mode (`--engine cpu`, or auto without a CUDA build) | the last 6 pixels of the file, as long as they are invisible | (58–63, 63), end of the left sleeve overlay |
+| Generic mode (`--engine generic`, or when the last pixels are visible) | a 64-bit counter in the RGB of the last 3 invisible pixels found | (61–63, 63) |
 | Generic + `--unused-only` | the same, but only pixels no model face ever samples (also disables fast mode) | (61–63, 51), unused corner next to the left sleeve |
 
 The Mojang search never changes alpha, only the RGB under alpha 0. NameMC mode (section 6) sets alpha 0 → 1 on its pixels.
 
 The tool checks each skin instead of assuming. Fast mode runs only if every one of its pixels is a
 transparent overlay pixel or an unused pixel. Otherwise it falls back to generic mode with other invisible
-pixels. `--fast` stops with the reason instead of falling back to the 300× slower generic search.
+pixels. `--no-generic` stops with the reason instead of falling back to the 300× slower generic search.
+`py skinhash.py pixels SKIN` shows which pixels each mode would use on a given skin and whether fast mode is possible.
 
 Before you upload, `verify` re-checks every hit: the file hashes to its name, real zlib reproduces it byte
 for byte, and no visible pixel differs from the original skin. A pixel whose alpha went 0 to 1 on an overlay
@@ -125,11 +126,11 @@ A rollover costs under a second.
 
 ![Search speed comparison](speed.svg)
 
-| Mode | Command | Rate |
+| Mode | Option | Rate |
 |---|---|---|
-| Generic (CPU) | `--generic` | ~150–170k/s |
-| Fast mode (CPU) | default | ~45–50M/s |
-| Fast mode (GPU) | `--gpu` | ~3.85G/s |
+| Generic (CPU) | `--engine generic` | ~150–170k/s |
+| Fast mode (CPU) | `--engine cpu` | ~45–50M/s |
+| Fast mode (GPU) | `--engine gpu` | ~3.85G/s |
 
 Each extra leading zero takes 16× longer on average:
 
@@ -182,8 +183,8 @@ has the same message for every candidate, so on the GPU its K+W constants are pr
 hashes 1024 counters that differ only in the last pixel, which shares the work before that word.
 
 **Combining with a Mojang id.** The Mojang search changes only RGB under alpha 0 (and the alpha-0
-watermark), which NameMC ignores. So: `namemc` first, then `search` on the result. The alpha-1 pixels are
-fixed for `search`, and `verify` still passes (also against the original skin). Side effect: the bytes next to the tail often prevent the
+watermark), which NameMC ignores. So: `namemc` first, then `mojang` on the result (the `both` command does exactly this). The alpha-1 pixels are
+fixed for `mojang`, and `verify` still passes (also against the original skin). Side effect: the bytes next to the tail often prevent the
 one-block layout of GPU fast mode, which then runs at about 2.1 G/s instead of 3.9 G/s.
 
 | Mode | Rate |

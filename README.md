@@ -13,39 +13,156 @@ that re-encode, so those bytes are free knobs.
 
 ## Usage
 
-```
-gcc -O3 -march=native -Wall -Wextra -o fastfinder.exe fastfinder.c -lz -lpthread
-gcc -O3 -march=native -Wall -Wextra -o hashfinder.exe hashfinder.c -lz -lpthread
-gcc -O3 -march=native -Wall -Wextra -o namemcfinder.exe namemcfinder.c -lz -lpthread   # NameMC mode (below)
+Build the finders once (`powershell -File build.ps1`, `-NoGpu` to skip CUDA), then:
 
-py skinhash.py predict skins/me.png                  # id Mojang would assign
-py skinhash.py search  skins/me.png -p c0ffee        # id (trimmed) starts with c0ffee
-py skinhash.py search  skins/me.png -z 8             # keep ids with >= 8 leading zeros (shortest links)
-py skinhash.py search  skins/me.png -s dead -n 3     # id ends with dead, stop after 3 hits
-py skinhash.py verify  skins/me.png found/me/<id>.png   # also accepts NameMC results (alpha 0 -> 1 knobs)
-py skinhash.py search  skins/me.png --gpu --fast -z 10 # never fall back to the slow generic search
+```
+py skinhash.py mojang skins/me.png -p c0ffee        # Mojang link starting with c0ffee
+py skinhash.py namemc skins/me.png -p beef          # NameMC page starting with beef
+py skinhash.py both   skins/me.png --namemc-prefix beef --mojang-prefix cafe
+py skinhash.py ids    skins/me.png                  # both ids and links of a skin
+py skinhash.py verify skins/me.png found/me/<id>.png
 ```
 
-`search` forwards these options to the finder:
+`py skinhash.py --help` lists the commands, `py skinhash.py COMMAND --help` shows the options and examples of one.
 
-- `-p HEX`: prefix of the trimmed id. Repeatable, may not start with `0`.
-- `-s HEX`: suffix.
-- `-z N`: save anything with >= N leading zero nibbles.
-- `-t N`: threads.
-- `-S SEED`: start seed.
-- `-n N`: stop after N hits.
-- `-b`: benchmark, 10 s, saves no files.
+| Command | What it does |
+|---|---|
+| `mojang SKIN` | search for a Mojang texture link |
+| `namemc SKIN` | search for a NameMC skin page |
+| `both SKIN` | NameMC search, then Mojang search on its hit |
+| `ids FILE\|ID\|URL...` | Mojang texture id and NameMC id of skins |
+| `verify ORIGINAL RESULT` | check a hit against the skin it came from |
+| `detect FILE\|ID\|URL...` | is the skin watermarked by skinhash |
+| `pixels SKIN` | which pixels each mode would change |
+| `bench` | 10 s benchmark of the engines |
 
-These are handled by `skinhash.py` itself:
+Options shared by the search commands (`mojang`, `namemc`, `both`):
 
-- `--generic`: force hashfinder.
-- `--k N`: pixels permuted by fast mode (default 6). With `--gpu` it is an upper bound: the job builder picks the largest K <= N that gives a one-block SHA.
-- `--unused-only`: only use pixels outside the model UV. Disables fast mode.
-- `--out DIR`: output directory (default `found/<skin>/`).
+| Option | Meaning |
+|---|---|
+| `-p, --prefix HEX` | id starts with HEX. Repeatable. |
+| `-s, --suffix HEX` | id ends with HEX. Repeatable. |
+| `-z, --zeros N` | at least N leading zero digits. Repeatable. |
+| `-n, --count N` | stop after N verified hits (default 1) |
+| `--every-target` | run until every target has a hit; the first hit per target is kept, `-n` is ignored |
+| `--engine auto\|gpu\|cpu\|generic` | auto (default) uses the GPU if its exe is built and passes its self-check, else CPU fast mode, else the generic search. `generic` is Mojang only. |
+| `--no-generic` | never fall back to the slow generic search (Mojang) |
+| `--unused-only` | only pixels no model face samples; incompatible with the Mojang fast modes |
+| `--tail-pixels N` | pixels permuted by Mojang fast mode (default 6) |
+| `--no-watermark` | skip the invisible watermark |
+| `-o, --out DIR` | output directory |
+| `--threads N`, `--seed N` | CPU threads; start seed |
 
-`-p c0ffee` matches both `c0ffee...` and `000c0ffee...` hashes, because the link drops leading zeros.
-`skinhash.py` re-verifies every hit (hash equals filename, Python zlib re-encodes the file identically,
-no visible pixel changed) and prints `HIT <why> sha=<full hex> id=<trimmed id> counter=<n> file=<path>`.
+Prefixes are hex, at most 16 digits. Targets of one command are alternatives: a hit matches any of them.
+Every hit is re-verified by `skinhash.py` (hash equals file name, Python zlib re-encodes the file identically,
+no visible pixel changed) and printed as `HIT <why> sha=<full hex> id=<id> counter=<n> file=<path>`.
+Ctrl+C stops everything and never starts a fallback. Unknown options are an error; nothing is passed on to the
+finders unchecked.
+
+### mojang
+
+```
+py skinhash.py mojang skins/me.png -p c0ffee            # id (trimmed) starts with c0ffee
+py skinhash.py mojang skins/me.png -z 8                 # >= 8 leading zeros (shortest links)
+py skinhash.py mojang skins/me.png -s dead -n 3         # ends with dead, stop after 3 hits
+py skinhash.py mojang skins/me.png -z 10 --no-generic   # never use the slow search
+```
+
+Output goes to `found/<skin>/` by default. Mojang drops leading zeros from the link, so `-p` matches the
+trimmed id (`-p c0ffee` matches `c0ffee...` and `000c0ffee...`) and may not start with `0`: use `-z`.
+
+Engines: `auto` runs `gpufinder` if it is built and passes its self-check, else `fastfinder` on the CPU, else
+`hashfinder` (generic, about 300x slower). One line printed at the start says which engine runs and why. Fast
+mode needs the last K pixels (row 63) to be invisible; `pixels` tells you whether they are. `--engine gpu` and
+`--engine cpu` prefer that engine and fall back as described. `--unused-only` rules out the fast modes, so it
+combines with `auto` (generic search) but not with `--engine gpu|cpu` or `--no-generic`. On the GPU
+`--tail-pixels` is an upper bound: the job builder takes the largest K <= N that gives a one-block SHA.
+
+### namemc
+
+```
+py skinhash.py namemc skins/me.png -p beef                      # id starts with beef
+py skinhash.py namemc skins/me.png -p 0000 -n 3                 # prefixes may start with 0 (fixed 16 digits)
+py skinhash.py namemc skins/me.png -s cafe --every-target --engine gpu
+```
+
+Output goes to `found/<skin>_namemc/`. `--engine auto` uses `namemcgpu` if built, else `namemcfinder`.
+`-z N` means N leading zero digits of the 16-digit id. `--engine generic`, `--no-generic` and `--tail-pixels`
+do not exist here. See "NameMC mode" below.
+
+### both
+
+```
+py skinhash.py both skins/me.png --namemc-prefix beef --mojang-prefix cafe
+py skinhash.py both skins/me.png --namemc-zeros 6 --mojang-zeros 9 --every-target
+py skinhash.py both skins/me.png --mojang-prefix c0ffee        # only one group: only that phase
+```
+
+| Option | Meaning |
+|---|---|
+| `--namemc-prefix/-suffix/-zeros` | NameMC targets (phase 1), same rules as `namemc` |
+| `--mojang-prefix/-suffix/-zeros` | Mojang targets (phase 2), same rules as `mojang` |
+| `-n`, `--every-target`, `--engine`, `--no-generic`, `--unused-only`, `--tail-pixels`, `--no-watermark`, `-o`, `--threads`, `--seed` | as above; `-n` applies to phase 2 |
+
+Phase 1 runs a NameMC search up to its first verified hit (with `--every-target`, across the NameMC targets, and
+the first hit is the base). Phase 2 runs a Mojang search on that hit. A summary prints both links, the final
+file is verified against the original skin and both ids are checked against their targets. Output goes to
+`found/<skin>_both/`. This mirrors the Both mode of the web page. `--engine generic` only affects phase 2.
+
+### ids
+
+```
+py skinhash.py ids skins/me.png
+py skinhash.py ids https://textures.minecraft.net/texture/<id>
+```
+
+Prints the Mojang texture id (trimmed, as in the URL), the NameMC id and both links. Texture ids and URLs are
+downloaded from textures.minecraft.net.
+
+### verify
+
+```
+py skinhash.py verify skins/me.png found/me/<id>.png
+```
+
+Prints `OK <link>` or `FAIL <reason>`; the exit code is 0 or 1. It also accepts NameMC and Both results (alpha 0
+to 1 on overlay or unused pixels counts as a NameMC knob).
+
+### detect
+
+```
+py skinhash.py detect found/me/<id>.png <texture id> https://textures.minecraft.net/texture/<id>
+```
+
+Reports whether each skin carries the watermark (see "Watermark").
+
+### pixels
+
+```
+py skinhash.py pixels skins/me.png
+```
+
+Shows the pixels each mode would change on this skin: Mojang fast GPU and CPU tail, generic, generic with
+`--unused-only`, NameMC default and with `--unused-only`, and the watermark spot. It says whether fast mode is
+possible and, if not, which pixel stops it. `--tail-pixels N` changes the tail size that is checked.
+
+### bench
+
+```
+py skinhash.py bench                  # GPU (if built) and CPU, Mojang and NameMC
+py skinhash.py bench --engine gpu
+py skinhash.py bench skins/me.png --engine cpu --threads 8
+```
+
+Runs the 10 s benchmark of each chosen engine on a skin (default `skins/steve.png`) and prints candidates per
+second. Nothing is saved.
+
+### Old names
+
+These still work and print a one-line note on stderr: `search` (now `mojang`), `predict` and `namemc-id` (now
+`ids`; they keep their old one-line output), `knobs` (now `pixels`), `--gpu` (`--engine gpu`), `--generic`
+(`--engine generic`), `--fast` (`--no-generic`), `--all` (`--every-target`), `--k` (`--tail-pixels`).
+`--out` is the long form of `-o`.
 
 ## Finders
 
@@ -93,7 +210,7 @@ patterns and 16 CPU-computed test vectors.
 
 The rate is about 3.85e9 candidates/s on an RTX 5060 Ti, up from about 1.2e9. Four things get it there:
 
-- **One SHA-256 block per candidate.** `--auto` looks for the largest K <= `--k` and a random value set
+- **One SHA-256 block per candidate.** `--auto` looks for the largest K <= `--tail-pixels` and a random value set
   where the variable region, the 9 padding bytes and the 12 constant IEND bytes fit in the last 64-byte
   block (`V0 + nvar + 12 + 9 <= 64`). For the example skin, and the other skins we tried, K=6 did not fit: the variable region starts
   8-11 bytes into its block and is 40 bytes long. K=5 fits (`V0` 7-9, 34-35 bytes), usually within a few value sets.
@@ -111,9 +228,9 @@ The rate is about 3.85e9 candidates/s on an RTX 5060 Ti, up from about 1.2e9. Fo
 
 ```
 powershell -File build.ps1                 # builds hashfinder, fastfinder, gpufinder (-NoGpu to skip CUDA)
-py skinhash.py search skins/me.png --gpu -z 9
-py skinhash.py search skins/me.png --gpu -p c0ffee -n 3
-py skinhash.py search skins/me.png --gpu -b          # 10 s benchmark, prints RATE n, saves nothing
+py skinhash.py mojang skins/me.png --engine gpu -z 9
+py skinhash.py mojang skins/me.png --engine gpu -p c0ffee -n 3
+py skinhash.py bench --engine gpu                    # 10 s benchmark, saves nothing
 
 # manual:
 fastfinder.exe found/me/base.raw 6 found/me --dump-job job.bin --auto -p dead
@@ -128,7 +245,7 @@ Safety:
 - Before searching, the GPU must reproduce all test vectors of the job bit for bit. Otherwise it exits with code 5.
 - Every hit is rebuilt on the CPU (independent code path) and re-hashed with a CPU SHA-256 before it is
   reported or written.
-- `--gpu` falls back to CPU fastfinder, with a message, if gpufinder.exe is missing or fails.
+- `--engine gpu` (and `auto`, when gpufinder.exe is built) falls back to CPU fastfinder, with a message, if gpufinder fails its gate.
 
 Measured on an RTX 5060 Ti: about 3.85e9 candidates/s (K=5, 1 SHA block), against ~45–50M/s for fastfinder
 on 12 CPU threads, roughly 80x. Expected times for `-z N` at 3.85e9/s:
@@ -165,14 +282,14 @@ Checked on about 1000 skins and on the skins in this repo. Because RGB under alp
 knob does nothing here. The NameMC knob is a pixel with alpha 1 and a free RGB.
 
 ```
-py skinhash.py namemc-id skins/me.png                    # NameMC id (and Mojang id) of files
-py skinhash.py namemc skins/me.png -p beef               # id starts with beef
-py skinhash.py namemc skins/me.png --gpu -p 0000 -n 3    # prefixes may start with 0 (fixed 16 digits)
-py skinhash.py namemc skins/me.png --gpu -s cafe --all   # also -z N, -t, -S, -b, --unused-only, --out DIR
+py skinhash.py ids skins/me.png                                  # NameMC id (and Mojang id) of files
+py skinhash.py namemc skins/me.png -p beef                       # id starts with beef
+py skinhash.py namemc skins/me.png --engine gpu -p 0000 -n 3     # prefixes may start with 0 (fixed 16 digits)
+py skinhash.py namemc skins/me.png --engine gpu -s cafe --every-target
 ```
 
-Options as for `search` (`-p/-s/-z/-n/-t/-S/-b`, `--gpu`, `--all`, `--out`, default `found/<skin>_namemc/`).
-`-z N` means N leading zero nibbles of the 16-digit id. `--gpu` falls back to the CPU if namemcgpu fails.
+Options as for `mojang` (see Usage), default output `found/<skin>_namemc/`.
+`-z N` means N leading zero nibbles of the 16-digit id. The GPU engine falls back to the CPU if namemcgpu fails.
 Every hit is checked by `skinhash.py`: the recomputed NameMC id equals the filename, only knob pixels changed
 (alpha 0 to 1) plus the watermark, and all knob pixels are overlay or unused. The hit line also prints the
 Mojang texture link of the file. Files are written in Mojang's PNG encoding.
@@ -200,13 +317,15 @@ Measured (12 threads, RTX 5060 Ti), candidates per second:
 A 16^n prefix takes 16^n / rate: 8 hex digits ~1.5 s, 10 digits ~6.5 min, 12 digits ~28 h on the GPU.
 
 Combining with the Mojang id: NameMC ignores RGB under alpha 0 and the Mojang search only changes RGB under
-alpha 0, so run the NameMC search first, then `search` on its output. The alpha-1 pixels are not knobs for
-`search`, and the NameMC id of the result is the same. Limit: the extra bytes next to the tail usually stop
+alpha 0, so run the NameMC search first, then `mojang` on its output (`both` does this in one command). The alpha-1 pixels are not knobs for
+`mojang`, and the NameMC id of the result is the same. Limit: the extra bytes next to the tail usually stop
 the GPU Mojang search from finding a one-block layout, so it runs at ~2.1G/s instead of ~3.9G/s.
 
 ```
-py skinhash.py namemc skins/me.png --gpu -p beef -n 1
-py skinhash.py search found/me_namemc/<id>.png --gpu -p cafe -n 1
+py skinhash.py both skins/me.png --namemc-prefix beef --mojang-prefix cafe
+# the same in two steps:
+py skinhash.py namemc skins/me.png -p beef
+py skinhash.py mojang found/me_namemc/<id>.png -p cafe
 ```
 
 NameMC shows the id as a fixed 16 digits, leading zeros included (checked with `namemc.com/skin/00000000001d91b1`).

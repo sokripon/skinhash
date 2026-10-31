@@ -5,11 +5,15 @@
 Values are illustrative: the shuffle, tail bytes and hashes are made up, but the
 structure (what stays fixed, what changes) matches the real fast mode.
 """
+import base64
 import os
 import random
 
+from PIL import Image
+
 HERE = os.path.dirname(os.path.abspath(__file__))
-W, H = 940, 420
+W, H = 940, 605
+TOP = 185  # height of the skin section; everything else is shifted down by this
 FRAMES = 4
 DUR = 8.0  # seconds for the whole loop
 MONO = "Consolas, Menlo, monospace"
@@ -63,12 +67,68 @@ def pulse():
             f'keyTimes="{";".join(f"{k:.4f}" for k in kts)}" values="{";".join(vals)}"/>')
 
 
-o = [f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {W} {H}" width="{W}" height="{H}" '
+o = [f'<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 {W} {H}" width="{W}" height="{H}" '
      f'font-family="Segoe UI, Helvetica, Arial, sans-serif">',
      f'<rect width="{W}" height="{H}" rx="12" fill="#ffffff"/>',
      '<text x="24" y="34" font-size="18" font-weight="600" fill="#1d1d1f">Fast mode, one candidate at a time</text>',
      '<text x="24" y="56" font-size="12.5" fill="#555">Red parts change every candidate. Blue parts are computed once '
      'and reused for all of them.</text>']
+
+# --- skin ---------------------------------------------------------------
+SKIN = os.path.join(os.path.dirname(HERE), "skins", "scorpion3013.png")
+skin = Image.open(SKIN).convert("RGBA")
+b64 = base64.b64encode(open(SKIN, "rb").read()).decode()
+ZX, ZY, ZW, ZH = 48, 60, 16, 4  # zoomed region: x 48-63, rows 60-63
+KNOBS = [(59 + j, 63) for j in range(5)]
+
+
+def checker(x, y, w, h, cell):
+    out = [f'<rect x="{x}" y="{y}" width="{w}" height="{h}" fill="#e8e8e8"/>']
+    for cy in range(0, h, cell):
+        for cx in range(0, w, cell):
+            if (cx // cell + cy // cell) % 2:
+                out.append(f'<rect x="{x + cx}" y="{y + cy}" width="{min(cell, w - cx)}" '
+                           f'height="{min(cell, h - cy)}" fill="#cfcfcf"/>')
+    return out
+
+
+def zoom(x0, y0, cell, title, reveal):
+    out = [f'<text x="{x0}" y="{y0 - 10}" font-size="12.5" font-weight="600" fill="#1d1d1f">{title}</text>']
+    out += checker(x0, y0, ZW * cell, ZH * cell, cell // 2)
+    for ry in range(ZH):
+        for rx in range(ZW):
+            r, g, b, a = skin.getpixel((ZX + rx, ZY + ry))
+            if a and (ZX + rx, ZY + ry) not in KNOBS:
+                out.append(f'<rect x="{x0 + rx * cell}" y="{y0 + ry * cell}" width="{cell}" height="{cell}" '
+                           f'fill="#{r:02x}{g:02x}{b:02x}"/>')
+    out.append(f'<rect x="{x0}" y="{y0}" width="{ZW * cell}" height="{ZH * cell}" fill="none" stroke="#999"/>')
+    kx = x0 + (KNOBS[0][0] - ZX) * cell
+    ky = y0 + (KNOBS[0][1] - ZY) * cell
+    if reveal:
+        for i, f in enumerate(frames):
+            out += [f'<g opacity="{1 if i == 0 else 0}">', visible(i)]
+            for j in range(5):
+                col = "".join(f["perm"][3 * j:3 * j + 3])
+                out.append(f'<rect x="{kx + j * cell}" y="{ky}" width="{cell}" height="{cell}" fill="#{col}"/>')
+            out.append("</g>")
+    out.append(f'<rect x="{kx}" y="{ky}" width="{5 * cell}" height="{cell}" fill="none" stroke="{RED}" '
+               f'stroke-width="2" stroke-dasharray="4 2"/>')
+    return out
+
+
+o.append('<text x="24" y="88" font-size="13.5" font-weight="600" fill="#1d1d1f">The skin</text>')
+o += checker(24, 98, 128, 128, 8)
+o.append(f'<image x="24" y="98" width="128" height="128" style="image-rendering:pixelated" '
+         f'href="data:image/png;base64,{b64}" xlink:href="data:image/png;base64,{b64}"/>')
+o.append(f'<rect x="{24 + ZX * 2}" y="{98 + ZY * 2}" width="{ZW * 2}" height="{ZH * 2}" fill="none" '
+         f'stroke="{RED}" stroke-width="1.5"/>')
+o.append(f'<path d="M{24 + 64 * 2 + 2} {98 + 62 * 2} L196 {130 + 2 * 22}" stroke="{RED}" stroke-width="1.2" '
+         'stroke-dasharray="4 3" fill="none"/>')
+o += zoom(200, 130, 22, "Stored in the file (hidden RGB drawn)", reveal=True)
+o += zoom(586, 130, 20, "Seen in game (alpha 0 = transparent)", reveal=False)
+o.append(f'<text x="200" y="240" font-size="11.5" fill="#555">Rows 60–63, x 48–63. The 5 dashed pixels get new '
+         'hidden colours every candidate; in game they stay invisible.</text>')
+o.append(f'<g transform="translate(0,{TOP})">')
 
 # --- pixels -------------------------------------------------------------
 o.append('<text x="24" y="88" font-size="13.5" font-weight="600" fill="#1d1d1f">Last 5 pixels: '
@@ -130,6 +190,7 @@ for i, f in enumerate(frames):
 
 o.append('<text x="24" y="404" font-size="11.5" fill="#777">Illustrative values. The real search does this '
          'about 3.85 billion times per second on an RTX 5060 Ti.</text>')
+o.append("</g>")
 o.append("</svg>")
 
 path = os.path.join(HERE, "fast-mode-animated.svg")

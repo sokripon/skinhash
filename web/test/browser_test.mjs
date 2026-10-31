@@ -48,7 +48,9 @@ try {
 
   const input = await page.$("#file");
   await input.uploadFile(skin);
-  await page.waitForFunction(() => window.__skinhash?.prep, { timeout: 10000 });
+  // wait for OUR skin, not the default Steve the page loads on start
+  await page.waitForFunction((n) => window.__skinhash?.prep && window.__skinhash.name === n,
+    { timeout: 10000 }, path.basename(skin, ".png"));
   const info = await page.evaluate(() => ({ eligible: __skinhash.prep.eligible, wm: __skinhash.prep.wm.length, id: __skinhash.origId }));
   check(info.eligible && info.wm === 6, `skin loaded, fast mode eligible, watermark pixels=${info.wm}, current id ${info.id}`);
 

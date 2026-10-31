@@ -44,3 +44,5 @@ pako before it is shown.
 
 `browser_test.mjs` needs `puppeteer-core`, which is deliberately not in this repo: install it in a scratch
 folder and set `WEBTEST_DIR` to that folder.
+
+On start the page loads classic Steve (texture `1a4af718…`) from textures.minecraft.net, which allows cross-origin requests, and checks that the bytes hash to that id. The texture isn't bundled. Dropping or choosing your own skin replaces it. Offline, the page simply starts empty.

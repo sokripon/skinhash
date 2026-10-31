@@ -70,8 +70,27 @@ function rebuildPrep() {
 
 async function pick(file) {
   if (!file) return;
+  S.userPicked = true;
   loadSkinBytes(new Uint8Array(await file.arrayBuffer()), file.name);
 }
+
+// Default skin: classic Steve, fetched from Mojang (CORS allowed) instead of bundling Mojang's asset.
+// The bytes must hash to the texture id; a skin the user picks meanwhile always wins.
+const STEVE_ID = "1a4af718455d4aab528e7a61f86fa25e6a369d1768dcb13f7df319a713eb810b";
+async function loadDefaultSkin() {
+  try {
+    const r = await fetch(`https://textures.minecraft.net/texture/${STEVE_ID}`);
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const bytes = new Uint8Array(await r.arrayBuffer());
+    if (toHex(sha256(bytes)) !== STEVE_ID) throw new Error("unexpected bytes");
+    if (S.userPicked) return;
+    loadSkinBytes(bytes, "steve.png");
+    if (S.prep?.eligible) setStatus("Loaded the default Steve skin. Drop or choose your own skin to replace it.");
+  } catch (e) {
+    console.warn("default Steve skin not loaded:", e.message);   // offline etc.: page just starts empty
+  }
+}
+loadDefaultSkin();
 $("file").addEventListener("change", (e) => pick(e.target.files[0]));
 const drop = $("drop");
 ["dragenter", "dragover"].forEach((ev) => drop.addEventListener(ev, (e) => { e.preventDefault(); drop.classList.add("over"); }));

@@ -21,14 +21,40 @@ If you change any pixel, you get a completely different, unpredictable id. Findi
 
 ![Map of the 64×64 skin layout](pixel-map.svg)
 
-- **Base layer (blue):** Minecraft draws it fully opaque and ignores alpha there, so hidden colours would show up. The tool never touches it.
-- **Overlay layer (purple):** drawn with transparency. A pixel with alpha 0 shows nothing, whatever its RGB, and Mojang keeps that RGB (verified by a real upload).
-- **Unused (grey):** no part of the player model samples these pixels.
-- **Watermark (orange):** 6 transparent unused pixels whose RGB bytes spell `sokripon skinhash` + a version byte. Check a skin with `py skinhash.py detect`.
-- **Search pixels (red):** the fast modes vary the RGB of the last pixels of the file: 5 on the GPU, (59–63, 63), chosen so the changing bytes fit one SHA block; 6 on the CPU, (58–63, 63). On this skin they are transparent sleeve-overlay pixels. Their alpha stays 0, so they stay invisible.
-- **Generic mode** (`--generic`, or skins whose last pixels are visible) writes a counter into the RGB of the last 3 invisible pixels it finds. With `--unused-only` it only uses pixels no model face samples at all.
+| Area | How Minecraft treats it | Used by the tool? |
+|---|---|---|
+| **Base layer** (blue) | Drawn fully opaque. The skin loader forces alpha to 255 here, so hidden colours would show. | Never touched |
+| **Overlay layer** (purple) | Drawn with transparency. A pixel with alpha 0 shows nothing, whatever its RGB. | Only pixels that are already fully transparent |
+| **Unused** (grey) | No face of the player model samples it, so it's never drawn. | Watermark, `--unused-only` |
 
-`verify` re-checks every hit: the file hashes to its name, real zlib reproduces it byte for byte, and no visible pixel differs from the original.
+### Which pixels each mode changes
+
+| Mode | Pixels changed | Coordinates on the test skin |
+|---|---|---|
+| Watermark (every mode) | 6 unused transparent pixels; RGB spells `sokripon skinhash` + version byte `0x02` | (0, 0)–(5, 0), top-left corner of the head layout |
+| GPU fast mode (`--gpu`) | the last 5 pixels of the file, as long as they are invisible | (59–63, 63), end of the left sleeve overlay |
+| CPU fast mode (default) | the last 6 pixels of the file, as long as they are invisible | (58–63, 63), end of the left sleeve overlay |
+| Generic mode (`--generic`, or when the last pixels are visible) | a 64-bit counter in the RGB of the last 3 invisible pixels found | (61–63, 63) |
+| Generic + `--unused-only` | the same, but only pixels no model face ever samples (also disables fast mode) | (61–63, 51), unused corner next to the left sleeve |
+
+**Rules that apply to all modes:**
+- Alpha is never changed. Only the RGB under an alpha of 0 is.
+- The tool **checks** each skin instead of assuming. Fast mode is only used if every one of its pixels is a transparent overlay pixel or an unused pixel. Otherwise it falls back to generic mode with other invisible pixels.
+- Before you upload, `verify` re-checks every hit:
+  - the file hashes to its name;
+  - real zlib reproduces it byte for byte;
+  - no visible pixel differs from the original skin.
+
+### How sure are we that the changes are invisible?
+
+| Claim | Status | Evidence |
+|---|---|---|
+| Mojang's servers keep the hidden RGB unchanged | **Proven** | A test upload and the 11-zero upload both got exactly the predicted id. That's only possible if every hidden byte survived. |
+| The tool only touches transparent overlay or unused pixels | **Checked by code** | Selection rules above; `verify` checks every hit. |
+| The Java client draws nothing for alpha-0 overlay pixels | **Very likely** | The skin loader's alpha-forcing only covers base-layer regions, not the sleeve overlay. The overlay is drawn with alpha cutout, and skin textures aren't filtered. Partly transparent overlays with leftover colour are common in real skins. |
+| Every other renderer (Bedrock via Geyser, third-party viewers, mods) does the same | **Not tested** | `--unused-only` avoids the question entirely: those pixels are never drawn at all. |
+
+To check yourself: wear a skin made by the tool, open **Options → Skin Customization** or press F5, and look at the end of the left sleeve. Nothing should be visible there.
 
 ## 3. The fast-mode trick
 
@@ -39,11 +65,44 @@ Re-compressing the whole skin for every candidate is slow, about 170k tries/s. F
 1. It fills the search pixels with byte values that occur **nowhere else** in the image. zlib can't match them against earlier data, so they always come out as plain literals.
 2. Each candidate is a **reordering** of the same values. The symbol frequencies don't change, so the Huffman tables, the compressed size and every bit before the tail are identical for all candidates.
 3. Only the last ~50 bytes of the file change: the tail literal codes, the Adler-32 and the CRC-32.
-4. SHA-256 processes 64-byte blocks, so the ~55 fixed blocks are hashed once into a saved midstate. Each candidate then only finishes the last block (the job builder picks a pixel count that makes the changing bytes fit into one).
+4. SHA-256 processes 64-byte blocks, so the ~55 fixed blocks are hashed once into a saved midstate. Each candidate then only has to finish the last block or two.
 
 The result is the same file real zlib would produce, built with a few dozen bit operations. A start-up self-test compares 1000 random candidates against real zlib, and every hit is rebuilt and checked again.
 
-## 4. Speed
+## 4. Inside GPU mode
+
+The CPU prepares a small "job" once. It contains the fixed file prefix, the SHA-256 midstate, the Huffman codes of the search values, the Adler/CRC state and 16 test vectors. The GPU then hashes candidates from it.
+
+### What made it fast (RTX 5060 Ti)
+
+| Step | Rate |
+|---|---|
+| First working version (6 pixels, 2 SHA blocks per candidate) | 1.16 G/s |
+| **5 pixels instead of 6.** The changing bytes plus SHA padding now fit into **one** 64-byte block, which halves the SHA work. | 1.93 G/s |
+| **Smarter enumeration.** Each GPU thread decodes the first positions of its permutation once with 32-bit maths (no 64-bit divisions), then tries all 24 orderings of the last 4 positions. The bits after the shuffled region are constant, so only a few bytes are patched in. CRC-32 runs word by word, the Adler sum is updated linearly, and the global "best so far" counter is touched once per thread instead of once per candidate. | 3.58 G/s |
+| Block-size and occupancy tuning | **~3.85 G/s** |
+
+A kernel that does nothing but SHA-256 reaches about 4.46 G/s, so there's little headroom left.
+
+**Choosing the pixel count:** `fastfinder --dump-job --auto` tries pixel counts from 6 downwards, with up to 400 random value sets each. It picks the largest count whose changing bytes fit one SHA block: 5 on the test skin, where 6 never fits. If nothing fits, it falls back to the best 2-block configuration, at about 2.1 G/s.
+
+### Value-set rollover
+
+5 pixels hold 15 byte values, so one value set has 15! ≈ 1.3 trillion orderings. That's about 5.6 minutes of GPU time. The search then **rolls over** to a new one:
+
+1. gpufinder covers every ordering of the current set exactly once, prints `ROLLOVER` and exits with code 7.
+2. `skinhash.py` builds a new job with a fresh random value set, and the GPU passes the correctness check again.
+3. The search continues. The `tried=` counter, the rate and benchmarks keep counting across rollovers.
+
+A rollover costs under a second per ~5.6 minutes of searching.
+
+### Safety checks
+
+- **Correctness check:** before searching, and again after every rollover, the GPU must reproduce all 16 CPU-computed test vectors exactly. Otherwise it exits with code 5 and `skinhash.py` falls back to the CPU.
+- **Hit re-check:** every hit is rebuilt and re-hashed on the CPU before it's reported. `skinhash.py` then verifies it again with Python's real zlib.
+- **Ctrl+C:** stops the whole search and never triggers the CPU fallback.
+
+## 5. Speed
 
 ![Search speed comparison](speed.svg)
 
@@ -62,6 +121,8 @@ Each extra leading zero takes 16× longer on average:
 | 10 zeros | ~5 min |
 | 11 zeros | ~75 min |
 | 12 zeros | ~20 h |
+
+**Results so far:** an 11-zero id, `00000000000ce817…`. It's live as the link `textures.minecraft.net/texture/ce81796dbeb618dd6f893689e6f05a98faea679edba3bfda50315` (53 characters). As far as a ~64M-skin archive shows, the previous shortest real skin link had 8 zeros.
 
 ---
 

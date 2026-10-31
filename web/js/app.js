@@ -76,8 +76,8 @@ function loadSkinBytes(bytes, name, keepHits = false, internal = false) {
 
 function rebuildPrep() {
   if (!S.orig) return;
-  S.prep = prepareSkin(S.orig, { watermark: $("wm").checked });
-  S.nprep = prepareNameMc(S.orig, { watermark: $("wm").checked, unusedOnly: $("unusedonly").checked });
+  S.prep = prepareSkin(S.orig, { watermark: true });   // the watermark is always added
+  S.nprep = prepareNameMc(S.orig, { watermark: true, unusedOnly: $("unusedonly").checked });
   drawPreview(); renderInfo(); updateButtons();
   if (S.mode === "both" && !(S.nprep.eligible && S.prep.eligible)) setStatus("Both mode is not possible for this skin. " + (S.prep.eligible ? S.nprep.reason : S.prep.reason), "warn");
   else if (S.mode === "namemc") { if (!S.nprep.eligible) setStatus("NameMC mode is not possible for this skin. " + S.nprep.reason, "warn"); else setStatus("Ready."); }
@@ -113,7 +113,6 @@ const drop = $("drop");
 ["dragenter", "dragover"].forEach((ev) => drop.addEventListener(ev, (e) => { e.preventDefault(); drop.classList.add("over"); }));
 ["dragleave", "drop"].forEach((ev) => drop.addEventListener(ev, (e) => { e.preventDefault(); drop.classList.remove("over"); }));
 drop.addEventListener("drop", (e) => pick(e.dataTransfer.files[0]));
-$("wm").addEventListener("change", () => { if (!S.running) rebuildPrep(); });
 $("unusedonly").addEventListener("change", () => { if (!S.running) rebuildPrep(); });
 function setMode(m) {
   S.mode = m;

@@ -36,6 +36,8 @@ static atomic_int g_stop;
 static int g_nosave;           /* benchmark mode: never write files */
 static const char *g_dump;     /* --dump-job FILE: write the GPU job and exit */
 static int g_auto;             /* --auto: with --dump-job, look for K <= given K and a value set with nblk == 1 */
+static const char *g_tune_pix; /* --tune-pixels FILE: u32 raw offsets (R byte) of pixels that may be length-tuned */
+static const char *g_tune_out; /* --tune-out FILE: write the tuned raw scanlines here */
 static pthread_mutex_t g_io = PTHREAD_MUTEX_INITIALIZER;
 
 static const uint8_t PNG_SIG[8] = {0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n'};
@@ -394,24 +396,109 @@ static int try_setup(uint64_t *rng) {
     g_probe = 0;
     return ok;
 }
+/* Length tuning. Some skins have no K>=5 layout whose variable region plus padding fits one SHA
+ * block: where it lands depends on the compressed length before the tail. Changing the RGB of a
+ * few alpha-0 pixels earlier in the image (the caller supplies the allowed pixels) shifts that
+ * length. Random RGB values are tried until a 1-block layout with K >= TUNE_KMIN exists; the
+ * value set is always chosen afterwards from the bytes absent in the tuned image. */
+#define TUNE_KMIN 5
+#define TUNE_TRIES 4000
+#define TUNE_MAXPX 6      /* tuning pixels per try: 1..TUNE_MAXPX (each adds about 6 bytes of length) */
+#define TUNE_SETS 12      /* value sets probed per K for one tuning candidate */
+#define TUNE_V0MAX 24     /* a one-block layout needs V0 + nvar <= 43 (nvar >= 28 for K >= 5) */
+static uint32_t *g_tpix; static int g_ntpix;
+
+static void load_tune_pixels(void) {
+    FILE *f = fopen(g_tune_pix, "rb");
+    if (!f) return;
+    g_tpix = malloc(sizeof(uint32_t) * 4096);
+    g_ntpix = (int)fread(g_tpix, 4, 4096, f);
+    fclose(f);
+}
+
+/* Probe the current g_raw: largest K in [TUNE_KMIN, kmax] with a 1-block value set. Returns K or 0. */
+static int probe_k(int kmax, uint64_t *rng, int sets) {
+    /* cheap screen: where the tail starts in its block hardly depends on the value set */
+    configure_k(TUNE_KMIN);
+    if (!try_setup(rng) || F.V0 > TUNE_V0MAX) return 0;
+    for (int K = kmax; K >= TUNE_KMIN; K--)
+        for (int t = 0; t < sets; t++) {
+            configure_k(K);
+            if (try_setup(rng) && F.nblk == 1) return K;
+        }
+    return 0;
+}
+
+static int tune_search(int kmax, uint64_t *rng) {
+    if (!g_ntpix || kmax < TUNE_KMIN) return 0;
+    static uint8_t orig[RAW_LEN];
+    memcpy(orig, g_raw, RAW_LEN);
+    double t0 = now_s();
+    for (int tr = 1; tr <= TUNE_TRIES; tr++) {
+        int npx = 1 + ((tr - 1) / 24) % TUNE_MAXPX;   /* 24 tries per pixel count, fewest pixels first */
+        if (npx > g_ntpix) npx = g_ntpix;
+        memcpy(g_raw, orig, RAW_LEN);
+        int chosen[TUNE_MAXPX];
+        for (int i = 0; i < npx; i++) {
+            int c, dup;
+            do {
+                c = (int)rng_below(rng, (uint32_t)g_ntpix); dup = 0;
+                for (int j = 0; j < i; j++) dup |= chosen[j] == c;
+            } while (dup);
+            chosen[i] = c;
+            for (int j = 0; j < 3; j++) g_raw[g_tpix[c] + j] = (uint8_t)rng_next(rng);
+        }
+        int K = probe_k(kmax, rng, TUNE_SETS);
+        if (K) {
+            fprintf(stderr, "length tuning: %d pixel%s, %d tr%s -> K=%d, 1 block (%.1fs)\n", npx, npx == 1 ? "" : "s",
+                    tr, tr == 1 ? "y" : "ies", K, now_s() - t0);
+            if (g_tune_out) {
+                FILE *f = fopen(g_tune_out, "wb");
+                if (!f || fwrite(g_raw, 1, RAW_LEN, f) != RAW_LEN) { fprintf(stderr, "cannot write %s\n", g_tune_out); exit(1); }
+                fclose(f);
+            }
+            return K;
+        }
+    }
+    memcpy(g_raw, orig, RAW_LEN);
+    fprintf(stderr, "length tuning: no 1-block layout in %d tries (%.1fs), continuing without\n", TUNE_TRIES, now_s() - t0);
+    return 0;
+}
+
+/* The GPU's fast kernel needs every permuted value (the first min(n,20)) to have the same Huffman code
+ * length: then each code sits at a fixed bit position. Other value sets are valid too, they just run on the
+ * generic kernel, so auto mode prefers equal lengths and falls back to the best unequal one-block set. */
+static int eq_len(void) {
+    int m = g_n < 20 ? g_n : 20, l = (int)(F.tab[g_vals[0]] >> 16);
+    for (int i = 1; i < m; i++) if ((int)(F.tab[g_vals[i]] >> 16) != l) return 0;
+    return 1;
+}
+
 static void auto_choose(uint64_t *rng) {
     int kmax = g_K, fb_k = -1, fb_n = 1 << 30;
     uint64_t fb_rng = 0;
+    if (g_tune_pix) load_tune_pixels();
     for (int K = kmax; K >= 2; K--) {
+        if (K == TUNE_KMIN - 1 && kmax >= TUNE_KMIN && g_ntpix && tune_search(kmax, rng)) {
+            fb_k = -1; fb_n = 1 << 30; K = kmax + 1; continue;   /* restart on the tuned image */
+        }
         int ok_cnt = 0;
         for (int t = 0; t < AUTO_TRIES; t++) {
             uint64_t saved = *rng;
             configure_k(K);
             if (!try_setup(rng)) continue;
             ok_cnt++;
-            if (F.nblk == 1) {
-                fprintf(stderr, "auto: K=%d value set #%d gives nblk=1 (var region at block offset %zu, %zu bytes)\n", K, t + 1, F.V0, F.nvar);
+            int eq = eq_len();
+            if (F.nblk == 1 && eq) {
+                fprintf(stderr, "auto: K=%d value set #%d gives nblk=1 (var region at block offset %zu, %zu bytes), equal code lengths\n", K, t + 1, F.V0, F.nvar);
                 return;
             }
-            if (fb_k < 0 || (K == fb_k && (int)F.nblk < fb_n)) { fb_k = K; fb_n = (int)F.nblk; fb_rng = saved; }
+            int score = (int)F.nblk * 2 + !eq;   /* one block with unequal lengths still beats two blocks */
+            if (fb_k < 0 || (K == fb_k && score < fb_n)) { fb_k = K; fb_n = score; fb_rng = saved; }
         }
-        fprintf(stderr, "auto: K=%d: no single-block value set in %d tries (%d usable)\n", K, AUTO_TRIES, ok_cnt);
+        fprintf(stderr, "auto: K=%d: no one-block value set with equal code lengths in %d tries (%d usable)\n", K, AUTO_TRIES, ok_cnt);
         if (fb_k >= 0 && K <= fb_k - 2) break;   /* stay near the first usable K */
+        if (fb_k >= 0 && fb_n <= 3 && K <= TUNE_KMIN) break;   /* a one-block set (generic kernel) is in hand: do not go below K=5 (rollovers) */
     }
     if (fb_k < 0) UNSUPPORTED("no usable K / value set found in auto mode");
     configure_k(fb_k);
@@ -670,6 +757,8 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "-S") && v) { g_seed = strtoull(v, NULL, 0); i++; }
         else if (!strcmp(a, "-n") && v) { g_max_hits = atoll(v); i++; }
         else if (!strcmp(a, "--dump-job") && v) { g_dump = v; i++; }
+        else if (!strcmp(a, "--tune-pixels") && v) { g_tune_pix = v; i++; }
+        else if (!strcmp(a, "--tune-out") && v) { g_tune_out = v; i++; }
         else if (!strcmp(a, "--auto")) g_auto = 1;
         else if (!strcmp(a, "-b")) bench = g_nosave = 1;
         else { fprintf(stderr, "unknown option %s\n", a); return 1; }

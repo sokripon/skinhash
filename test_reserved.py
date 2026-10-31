@@ -85,6 +85,28 @@ for name, base in skins.items():
     except SystemExit:
         pass
 
+# length tuning pixels (Mojang job builder): never reserved, watermark, tail, last row or visible
+for name, base in skins.items():
+    r = bytearray(base)
+    wm = sh.apply_watermark(r, avoid=sh.MOJANG_TAIL)
+    avoid = set(wm) | sh.MOJANG_TAIL
+    tp = sh.tuning_pixels(r, avoid)
+    bm, om = sh.masks()
+    check(not (set(tp) & sh.RESERVED), f"{name}: tuning pixels ({len(tp)}) avoid RESERVED")
+    check(not (set(tp) & avoid) and all(y < sh.H - 1 for _, y in tp), f"{name}: tuning pixels avoid the watermark, the tail and the last row")
+    check(all(r[(y * sh.W + x) * 4 + 3] == 0 and (x, y) not in bm for x, y in tp), f"{name}: tuning pixels are alpha 0 and not base layer")
+    # a tuned copy (random RGB on up to 6 of them) must pass verify; the same change on a reserved pixel must not
+    rng = random.Random(3)
+    t = bytearray(r)
+    for x, y in rng.sample(tp, min(6, len(tp))):
+        t[(y * sh.W + x) * 4:(y * sh.W + x) * 4 + 3] = bytes(rng.randrange(256) for _ in range(3))
+    check(sh.reserved_change(r, t) is None, f"{name}: tuned image has no reserved pixel changed")
+    bad = bytearray(r)
+    px = next((p for p in sorted(sh.RESERVED) if r[(p[1] * sh.W + p[0]) * 4 + 3] == 0), None)
+    if px:
+        bad[(px[1] * sh.W + px[0]) * 4:(px[1] * sh.W + px[0]) * 4 + 3] = b"	"
+        check(sh.reserved_change(r, bad) == px, f"{name}: a change at reserved pixel {px} is detected")
+
 # the fixed tails used by the fast modes are not reserved
 check(not ({(sh.W - 6 + i, sh.H - 1) for i in range(6)} & sh.RESERVED), "Mojang fast-mode tail (58-63,63) not reserved")
 check(not ({(sh.W - 9 + i, sh.H - 1) for i in range(3)} & sh.RESERVED), "NameMC default knobs (55-57,63) not reserved")

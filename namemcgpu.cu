@@ -14,7 +14,8 @@
  * Kernels:
  *   fast:    knob words 9,10,11 of the first of exactly 2 blocks (the default layout, pixels (55-57,63)).
  *            One thread owns INNER consecutive counters that differ only in kp[2]; everything before
- *            kp[2]'s word is computed once per thread.
+ *            kp[2]'s word is computed once per thread. The rounds and schedule words that do not depend on
+ *            kp[2] are hoisted out of that loop (see fast_kernel).
  *   general: any layout (e.g. --unused-only), one candidate per thread.
  *
  * usage: namemcgpu rgba.bin OUTDIR -k x,y,x,y,x,y [--render-exe namemcfinder.exe] [-p HEX]... [-s HEX]...
@@ -56,6 +57,7 @@ __constant__ u32 c_mid[8];
 __constant__ u32 c_img[MAXNB * 16];     /* base words, big-endian; knob words hold 0x00000001 */
 __constant__ u32 c_kw[MAXNB * 64];      /* K[i] + W[i] for blocks without a knob word */
 __constant__ u32 c_isc[MAXNB];          /* 1 = block has no knob word */
+__constant__ u32 c_s9[8];               /* fast kernel: state of the first knob block after rounds 0-8 (words 0-8 are constant) */
 __constant__ u32 c_nb, c_np;
 __constant__ u32 c_pblk[NK], c_pwd[NK];
 __constant__ u64 c_pval[MAXPAT], c_pmask[MAXPAT];
@@ -120,26 +122,82 @@ __device__ __forceinline__ void record(u64 c) {
     if (pos < MAXHITS) d_hits[pos] = c;
 }
 
-/* fast kernel. MODE 1 (gate): thread i evaluates counter tc[i] and writes its id to out[i]. */
+/* Message schedule bookkeeping for the fast kernel. Only word 11 changes per candidate (words 9 and 10 per
+ * thread, the others per job), so schedule word i depends on the candidate iff one of its sources does. */
+struct DepTab { bool d[64]; };
+constexpr __host__ __device__ DepTab make_dep() {
+    DepTab t = {};
+    t.d[11] = true;
+    for (int i = 16; i < 64; i++) t.d[i] = t.d[i-16] || t.d[i-15] || t.d[i-7] || t.d[i-2];
+    return t;
+}
+#define SIG0(x) (ror(x, 7) ^ ror(x, 18) ^ ((x) >> 3))
+#define SIG1(x) (ror(x, 17) ^ ror(x, 19) ^ ((x) >> 10))
+
+/* fast kernel. MODE 1 (gate): thread i evaluates counter tc[i] and writes its id to out[i].
+ * Hoisting: rounds 0-8 depend only on job constants (host: c_s9); rounds 9-10 and the schedule words that
+ * do not depend on word 11 run once per thread, and every dependent schedule word keeps the sum of its
+ * independent terms in a register (pw). The 1024-candidate loop does only rounds 11-63 of the first block
+ * and the dependent part of the schedule, then the constant second block. */
 template <int MODE>
 __global__ void __launch_bounds__(BLOCK, MINB) fast_kernel(u64 base, const u64 *tc, u32 n, u64 *out) {
+    constexpr DepTab dep = make_dep();
     u32 gid = blockIdx.x * BLOCK + threadIdx.x;
     if (gid >= n) return;
     u64 cb = MODE ? (tc[gid] & ~(u64)(INNER - 1)) : base + (u64)gid * INNER;
     u32 tsel = MODE ? (u32)(tc[gid] & (INNER - 1)) : 0;
-    u32 w[16];
+    u32 w[64];
 #pragma unroll
     for (int i = 0; i < 16; i++) w[i] = c_img[i];
     w[9] = ((u32)(cb >> 48) << 8) | 1u;
     w[10] = (((u32)(cb >> 24) & 0xFFFFFFu) << 8) | 1u;
     u32 lo = (u32)cb & 0xFFFFFFu;
+    /* per thread: state after round 10 */
+    u32 p0 = c_s9[0], p1 = c_s9[1], p2 = c_s9[2], p3 = c_s9[3], p4 = c_s9[4], p5 = c_s9[5], p6 = c_s9[6], p7 = c_s9[7];
+    {
+        u32 a = p0, b = p1, c = p2, d = p3, e = p4, f = p5, g = p6, h = p7;
+        ROUND(c_K256[9] + w[9]);
+        ROUND(c_K256[10] + w[10]);
+        p0 = a; p1 = b; p2 = c; p3 = d; p4 = e; p5 = f; p6 = g; p7 = h;
+    }
+    /* per thread: schedule words independent of word 11, and the independent part of the others */
+#pragma unroll
+    for (int i = 16; i < 64; i++)
+        if (!dep.d[i]) w[i] = w[i-16] + SIG0(w[i-15]) + w[i-7] + SIG1(w[i-2]);
+    u32 pw[64];
+#pragma unroll
+    for (int i = 16; i < 64; i++) {
+        pw[i] = 0;
+        if (dep.d[i]) {
+            if (!dep.d[i-16]) pw[i] += w[i-16];
+            if (!dep.d[i-15]) pw[i] += SIG0(w[i-15]);
+            if (!dep.d[i-7]) pw[i] += w[i-7];
+            if (!dep.d[i-2]) pw[i] += SIG1(w[i-2]);
+        }
+    }
     u64 best = ~0ull;
     for (u32 t = 0; t < INNER; t++) {
         w[11] = ((lo + t) << 8) | 1u;
-        u32 st[8];
 #pragma unroll
-        for (int i = 0; i < 8; i++) st[i] = c_mid[i];
-        sha_full(st, w);
+        for (int i = 16; i < 64; i++) {
+            if (dep.d[i]) {
+                u32 v = pw[i];
+                if (dep.d[i-16]) v += w[i-16];
+                if (dep.d[i-15]) v += SIG0(w[i-15]);
+                if (dep.d[i-7]) v += w[i-7];
+                if (dep.d[i-2]) v += SIG1(w[i-2]);
+                w[i] = v;
+            }
+        }
+        u32 a = p0, b = p1, c = p2, d = p3, e = p4, f = p5, g = p6, h = p7;
+        ROUND(c_K256[11] + w[11]);
+#pragma unroll
+        for (int i = 12; i < 16; i++) ROUND(c_kw[i]);   /* words 12-15 are job constants */
+#pragma unroll
+        for (int i = 16; i < 64; i++) ROUND(c_K256[i] + w[i]);
+        u32 st[8];
+        st[0] = c_mid[0] + a; st[1] = c_mid[1] + b; st[2] = c_mid[2] + c; st[3] = c_mid[3] + d;
+        st[4] = c_mid[4] + e; st[5] = c_mid[5] + f; st[6] = c_mid[6] + g; st[7] = c_mid[7] + h;
         sha_const(st, 64);
         u64 id = ((u64)st[0] << 32) | st[1];
         if (MODE) { if (t == tsel) out[gid] = id; }
@@ -394,6 +452,19 @@ int main(int argc, char **argv) {
     }
     bool fast = nb == 2 && pblk[0] == 0 && pblk[1] == 0 && pblk[2] == 0 && pwd[0] == 9 && pwd[1] == 10 && pwd[2] == 11 && isc[1];
 
+    /* fast kernel: state of block 0 after rounds 0-8 (words 0-8 are constant; knob words are 9-11) */
+    u32 s9[8];
+    memcpy(s9, mid, sizeof s9);
+    {
+        u32 a = s9[0], b = s9[1], c = s9[2], d = s9[3], e = s9[4], f = s9[5], g = s9[6], h = s9[7];
+        for (int i = 0; i < 9; i++) {
+            u32 t1 = h + (HROR(e, 6) ^ HROR(e, 11) ^ HROR(e, 25)) + ((e & f) ^ (~e & g)) + kw[i];
+            u32 t2 = (HROR(a, 2) ^ HROR(a, 13) ^ HROR(a, 22)) + ((a & b) ^ (a & c) ^ (b & c));
+            h = g; g = f; f = e; e = d + t1; d = c; c = b; b = a; a = t1 + t2;
+        }
+        s9[0] = a; s9[1] = b; s9[2] = c; s9[3] = d; s9[4] = e; s9[5] = f; s9[6] = g; s9[7] = h;
+    }
+
     u64 pv[MAXPAT] = {0}, pm[MAXPAT] = {0};
     for (size_t i = 0; i < g_pats.size(); i++) { pv[i] = g_pats[i].val; pm[i] = g_pats[i].mask; }
     u32 np = (u32)g_pats.size(), nb32 = (u32)nb;
@@ -406,6 +477,7 @@ int main(int argc, char **argv) {
     CK(cudaMemcpyToSymbol(c_img, img.data(), MAXNB * 16 * 4));
     CK(cudaMemcpyToSymbol(c_kw, kw.data(), MAXNB * 64 * 4));
     CK(cudaMemcpyToSymbol(c_isc, isc.data(), MAXNB * 4));
+    CK(cudaMemcpyToSymbol(c_s9, s9, sizeof s9));
     CK(cudaMemcpyToSymbol(c_nb, &nb32, 4));
     CK(cudaMemcpyToSymbol(c_np, &np, 4));
     CK(cudaMemcpyToSymbol(c_pblk, pblk, sizeof pblk));

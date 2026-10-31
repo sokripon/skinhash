@@ -39,6 +39,9 @@ for (const [name, rgba] of Object.entries(skins)) {
   }
   const p = prepareSkin(rgba);
   check(p.knobs.every((q) => !RESERVED[idx(q)]) && p.wm.every((q) => !RESERVED[idx(q)]), `${name}: prepareSkin knobs and watermark avoid RESERVED`);
+  const wmSet = new Set(p.wm.map(idx));
+  check(p.tunePool.every((i) => !RESERVED[i] && !wmSet.has(i) && !MASKS.base[i] && rgba[i * 4 + 3] === 0 && i < (H - 1) * W),
+    `${name}: length-tuning pixels (${p.tunePool.length}) avoid RESERVED, the watermark, the base layer, opaque pixels and the last row`);
   for (const unusedOnly of [false, true]) {
     const n = prepareNameMc(rgba, { unusedOnly });
     if (n.eligible) check(n.knobIdx.every((i) => !RESERVED[i]) && n.wm.every((q) => !RESERVED[idx(q)]), `${name}: NameMC knobs ${JSON.stringify(n.knobs)} (unusedOnly=${unusedOnly}) avoid RESERVED`);

@@ -256,13 +256,15 @@ runs its usual self-test against real zlib, then writes a job file and exits. Th
 file prefix, SHA-256 midstate, tail layout, Huffman code per byte value, value set, Adler/CRC prefix state,
 patterns and 16 CPU-computed test vectors.
 
-The rate is about 3.85e9 candidates/s on an RTX 5060 Ti, up from about 1.2e9. Four things get it there:
+The rate is about 4.8e9 candidates/s on an RTX 5060 Ti, up from about 1.2e9. Five things get it there:
 
 - **One SHA-256 block per candidate.** `--auto` looks for the largest K <= `--tail-pixels` and a random value set
   where the variable region, the 9 padding bytes and the 12 constant IEND bytes fit in the last 64-byte
   block (`V0 + nvar + 12 + 9 <= 64`). For the example skin, and the other skins we tried, K=6 did not fit: the variable region starts
   8-11 bytes into its block and is 40 bytes long. K=5 fits (`V0` 7-9, 34-35 bytes), usually within a few value sets.
-  If nothing fits, it falls back to the best 2-block configuration (about 2.1e9/s).
+  If nothing fits, it first tries length tuning: it gives 1-6 invisible alpha-0 pixels earlier in the image random
+  RGB values until a one-block layout exists (typically 50-100 tries of ~1 ms), and only then falls back to the
+  best 2-block configuration (about 2.1e9/s). `--no-length-tuning` turns this off.
 - **Cached decoding.** Candidate index = `outer * 24 + t`. One thread owns one `outer`. It decodes the first
   m-4 positions of the permutation once (32-bit math, its thread id carry-added to the launch's base digits),
   emits their Huffman codes into a word image and keeps the bit accumulator, CRC-32 state and Adler-b sum. It
@@ -271,6 +273,13 @@ The rate is about 3.85e9 candidates/s on an RTX 5060 Ti, up from about 1.2e9. Fo
   tail codes, the EOB, Adler-a and the template bytes after it form one precomputed image. Only the pending
   bits, the two Adler-b bytes and the CRC bytes are patched in. CRC-32 advances a 32-bit word at a time. The
   CRC of the whole constant tail is two small linear table lookups (6 KB of shared memory).
+- **Fixed bit positions.** `--auto` prefers value sets whose permuted values all have the same Huffman code length
+  (usual for these skins: the values occur once each). Then every code sits at a bit position that does not depend
+  on the permutation, and a candidate's message words, CRC-32 and Adler-b are the OR / XOR / sum of per-(position, value)
+  table entries kept in shared memory. The first SHA-256 rounds, which only see words that depend on the thread, run once
+  per thread. This kernel is compiled per layout (`WI`, `KB`: the message word of the last four codes and of the Adler
+  bytes; 24 combinations cover every one-block layout). Value sets with unequal lengths, 2-block jobs and a failed
+  self-check of the fast kernel use the older generic kernel (~3.9e9/s).
 - **No per-candidate global memory traffic** except the rare hit list. The best-zeros counter is updated
   once per thread.
 
@@ -282,7 +291,7 @@ py skinhash.py bench --engine gpu                    # 10 s benchmark, saves not
 
 # manual:
 fastfinder.exe found/me/base.raw 6 found/me --dump-job job.bin --auto -p dead
-gpufinder.exe job.bin found/me [-p HEX] [-s HEX] [-z N] [-S SEED] [-n N] [-b]
+gpufinder.exe job.bin found/me [-p HEX] [-s HEX] [-z N] [-S SEED] [-n N] [-b] [--generic]
 ```
 
 gpufinder takes -p/-s/-z/-n/-S/-b like the other finders. Patterns given to it replace those in the job.
@@ -290,19 +299,21 @@ It prints the same `HIT ... file=` and progress lines, and `skinhash.py` still v
 
 Safety:
 
-- Before searching, the GPU must reproduce all test vectors of the job bit for bit. Otherwise it exits with code 5.
+- Before searching, the GPU must reproduce all test vectors of the job bit for bit (the 16 CPU vectors plus 112 more
+  checked against gpufinder's own byte-oriented builder), with the kernel it is going to use. If only the fast kernel
+  fails, gpufinder switches to the generic one and gates that; if that fails too it exits with code 5.
 - Every hit is rebuilt on the CPU (independent code path) and re-hashed with a CPU SHA-256 before it is
   reported or written.
 - `--engine gpu` (and `auto`, when gpufinder.exe is built) falls back to CPU fastfinder, with a message, if gpufinder fails its gate.
 
-Measured on an RTX 5060 Ti: about 3.85e9 candidates/s (K=5, 1 SHA block), against ~45–50M/s for fastfinder
-on 12 CPU threads, roughly 80x. Expected times for `-z N` at 3.85e9/s:
+Measured on an RTX 5060 Ti: about 4.8e9 candidates/s (K=5, 1 SHA block), against ~45–50M/s for fastfinder
+on 12 CPU threads, roughly 100x. Expected times for `-z N` at 4.8e9/s:
 
 | leading zeros | tries   | expected time |
 |---------------|---------|---------------|
-| 8             | 4.3e9   | ~1.1 s        |
-| 9             | 6.9e10  | ~18 s         |
-| 10            | 1.1e12  | ~4.8 min      |
+| 8             | 4.3e9   | ~0.9 s        |
+| 9             | 6.9e10  | ~14 s         |
+| 10            | 1.1e12  | ~3.8 min      |
 | 11            | 1.8e13  | ~75 min       |
 | 12            | 2.8e14  | ~20 h         |
 
@@ -359,7 +370,7 @@ Measured (12 threads, RTX 5060 Ti), candidates per second:
 
 | mode           | CPU     | GPU     |
 |----------------|---------|---------|
-| default knob   | ~135M   | ~2.8G   |
+| default knob   | ~135M   | ~3.1G   |
 | `--unused-only`| ~6.8M   | ~148M   |
 
 A 16^n prefix takes 16^n / rate: 8 hex digits ~1.5 s, 10 digits ~6.5 min, 12 digits ~28 h on the GPU.
@@ -367,7 +378,8 @@ A 16^n prefix takes 16^n / rate: 8 hex digits ~1.5 s, 10 digits ~6.5 min, 12 dig
 Combining with the Mojang id: NameMC ignores RGB under alpha 0 and the Mojang search only changes RGB under
 alpha 0, so run the NameMC search first, then `mojang` on its output (`both` does this in one command). The alpha-1 pixels are not knobs for
 `mojang`, and the NameMC id of the result is the same. Limit: the extra bytes next to the tail usually stop
-the GPU Mojang search from finding a one-block layout, so it runs at ~2.1G/s instead of ~3.9G/s.
+the GPU Mojang search from finding a one-block layout. Length tuning fixes that by changing the RGB of a few
+other invisible (alpha 0) pixels, so the Mojang phase still runs at ~4.8G/s instead of ~2.1G/s.
 
 ```
 py skinhash.py both skins/me.png --namemc-prefix beef --mojang-prefix cafe
@@ -392,7 +404,7 @@ The tool matches prefixes on those 16 digits, so `-z N` gives a NameMC link star
   ported from the CUDA finders.
 - Same safety checks: a GPU gate against CPU test vectors before every search, and a CPU check of every hit
   (ids, and only invisible pixels changed) before it's shown.
-- About 2.9G/s for Mojang links and 2.3G/s for NameMC on an RTX 5060 Ti in Chrome (~75-80% of native).
+- About 2.9G/s for Mojang links and 2.4G/s for NameMC on an RTX 5060 Ti in Chrome (~75-80% of native).
 
 Details and tests: [web/README.md](web/README.md).
 

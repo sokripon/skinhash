@@ -3,13 +3,17 @@
 import pako from "../vendor/pako.esm.mjs";
 import { W, H, ROW, RAW_LEN, DEFLATE_OPTS, rawScanlines, pngFromRaw } from "./png.js";
 import { sha256, sha256Blocks, stateToDigest, SHA_INIT, crc32 } from "./hash.js";
-import { knobPixels, applyWatermark, RESERVED } from "./model.js";
+import { knobPixels, applyWatermark, RESERVED, MASKS } from "./model.js";
 
 export const MIN_K = 5;     // fewer than 5 pixels (15 values) gives too few orderings to be worth it
 export const MAX_K = 6;
 export const RIN = 4;       // inner (cached) positions, = GPU_R in the native tool
 export const NPERM = 24;
 export const AUTO_TRIES = 400;
+export const TUNE_TRIES = 4000;   // length tuning, see tuneSearch
+export const TUNE_MAXPX = 6;
+export const TUNE_SETS = 12;
+export const TUNE_V0MAX = 24;
 
 export class Unsupported extends Error {}
 
@@ -55,7 +59,21 @@ export function prepareSkin(orig, { watermark = true, kmax = MAX_K } = {}) {
     for (let i = 0; i < MIN_K; i++) { const x = W - MIN_K + i; if (!kset.has((H - 1) * W + x)) bad.push(`(${x},${H - 1})`); }
     reason = `Needs the last ${MIN_K} pixels of the image (bottom row, right end) to be invisible. These are not: ${bad.join(" ")}.`;
   }
-  return { orig, rgba, raw: rawScanlines(rgba), wm, knobs, kvis, kmaxUsable, eligible, reason };
+  const tunePool = tuningPixels(rgba, wmSet);
+  return { orig, rgba, raw: rawScanlines(rgba), wm, knobs, kvis, kmaxUsable, eligible, reason, tunePool, tune: [] };
+}
+
+/** Pixel indices (y*W+x) that length tuning may give a random RGB: alpha 0, unused (preferred) or transparent
+ *  overlay, never RESERVED, never a watermark pixel (wmSet), never in the last row (Mojang tail, NameMC knobs).
+ *  Alpha-1 NameMC knob pixels are excluded by the alpha test. Mirrors tuning_pixels in skinhash.py. */
+export function tuningPixels(rgba, wmSet = new Set()) {
+  const unused = [], clearOver = [];
+  for (let y = 0; y < H - 1; y++) for (let x = 0; x < W; x++) {
+    const i = y * W + x;
+    if (RESERVED[i] || wmSet.has(i) || rgba[i * 4 + 3] !== 0 || MASKS.base[i]) continue;
+    (MASKS.over[i] ? clearOver : unused).push(i);
+  }
+  return unused.length >= 16 ? unused : unused.concat(clearOver);
 }
 
 export function knobLayout(K) {
@@ -369,8 +387,45 @@ export function makeTestVectors(job, rng, count = 24) {
 // ---------- auto choice of K and value set ----------
 const tick = () => new Promise((r) => setTimeout(r, 0));
 
-/** Largest K <= kmax whose variable region plus SHA padding fits one block; otherwise the best 2-block config. */
-export async function autoChoose(prep, rng, { kmax = prep.kmaxUsable, onProgress } = {}) {
+/** Largest K in [MIN_K, kmax] with a one-block value set, probed with `sets` random value sets; else null. */
+function probeK(prep, rng, kmax, sets) {
+  // cheap screen: where the tail starts in its block hardly depends on the value set
+  try { if (setupFast(prep, MIN_K, pickVals(prep, MIN_K, rng)).V0 > TUNE_V0MAX) return null; } catch (e) { if (e instanceof Unsupported) return null; throw e; }
+  for (let K = kmax; K >= MIN_K; K--) for (let t = 0; t < sets; t++) {
+    try { const job = setupFast(prep, K, pickVals(prep, K, rng)); if (job.nblk === 1) return { K, job }; } catch (e) { if (!(e instanceof Unsupported)) throw e; }
+  }
+  return null;
+}
+
+/** Length tuning (see fastfinder.c). When no K >= 5 layout fits one SHA block, give 1..6 alpha-0 pixels
+ *  (prep.tunePool) random RGB until one does: 24 tries per pixel count, fewest pixels first. On success prep.raw,
+ *  prep.rgba and prep.tune are updated, so the value set (chosen afterwards, from the bytes absent in the tuned
+ *  image) and every rollover keep the same tuned image. Returns {K, tries, pixels} or null. */
+export async function tuneSearch(prep, rng, kmax, onProgress) {
+  const pool = prep.tunePool;
+  if (!pool || !pool.length || kmax < MIN_K) return null;
+  const orig = prep.raw;
+  for (let tr = 1; tr <= TUNE_TRIES; tr++) {
+    const npx = Math.min(1 + (Math.floor((tr - 1) / 24) % TUNE_MAXPX), pool.length);
+    const raw = Uint8Array.from(orig), chosen = [];
+    while (chosen.length < npx) { const c = pool[rng.below(pool.length)]; if (!chosen.includes(c)) chosen.push(c); }
+    const rgbs = chosen.map(() => [rng.below(256), rng.below(256), rng.below(256)]);
+    chosen.forEach((i, j) => { const o = Math.floor(i / W) * ROW + 1 + (i % W) * 4; raw[o] = rgbs[j][0]; raw[o + 1] = rgbs[j][1]; raw[o + 2] = rgbs[j][2]; });
+    const hit = probeK({ ...prep, raw }, rng, kmax, TUNE_SETS);
+    if (hit) {
+      prep.raw = raw;
+      chosen.forEach((i, j) => { prep.rgba.set(rgbs[j], i * 4); });
+      prep.tune = prep.tune.concat(chosen);
+      return { K: hit.K, tries: tr, pixels: npx };
+    }
+    if (tr % 16 === 0) { onProgress?.(`length tuning (try ${tr})`); await tick(); }
+  }
+  return null;
+}
+
+/** Largest K <= kmax whose variable region plus SHA padding fits one block; otherwise length tuning, then the best
+ *  2-block config. result.tuning = {K, tries, pixels} when tuning was used. */
+export async function autoChoose(prep, rng, { kmax = prep.kmaxUsable, onProgress, tune = true } = {}) {
   let fb = null, lastErr = null;
   for (let K = kmax; K >= MIN_K; K--) {
     let ok = 0;
@@ -382,6 +437,14 @@ export async function autoChoose(prep, rng, { kmax = prep.kmaxUsable, onProgress
       if (t % 20 === 19) { onProgress?.(`searching a one-block layout (K=${K}, try ${t + 1}/${AUTO_TRIES})`); await tick(); }
     }
     if (fb && K <= fb.K - 2) break;
+  }
+  if (tune && kmax >= MIN_K) {
+    onProgress?.("length tuning");
+    const tuning = await tuneSearch(prep, rng, kmax, onProgress);
+    if (tuning) {
+      const r = await autoChoose(prep, rng, { kmax, onProgress, tune: false });   // value set chosen after tuning
+      return { ...r, tuning };   // the probe found a one-block set, so this is one too
+    }
   }
   if (!fb) throw new Unsupported(`no usable pixel count / value set found${lastErr ? " (" + lastErr + ")" : ""}`);
   return fb;

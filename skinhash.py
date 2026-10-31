@@ -216,6 +216,7 @@ ROLLOVER_RC = 7      # gpufinder: this value set is exhausted
 LAST_ROLLOVER = None  # (cumulative tried, cumulative seconds) from the last ROLLOVER line
 LAST_RATE = None      # candidates/s from the last RATE line (benchmark)
 GPU_FAILED = False    # the GPU search fell back to the CPU
+LENGTH_TUNING = True  # Mojang GPU job: tune the compressed length with alpha-0 pixels (--no-length-tuning)
 
 
 PROGRESS_RE = re.compile(r"^\[\s*(\d+)s\] tried=(\d+)\s+rate=(\d+)/s \(avg (\d+)/s\)\s+hits=(\d+)\s+best_zeros=(\d+)")
@@ -305,7 +306,35 @@ def drop_seed(args):
     return out
 
 
-def gpu_search(rawp, k, outdir, args, rgba, ext, on_hit=None):
+def tuning_pixels(rgba, avoid=()):
+    """Pixels length tuning may give a random RGB: fully transparent (alpha 0), unused (never drawn) or
+    transparent overlay, never RESERVED, never in AVOID (watermark, Mojang tail, ...) and never in the
+    last row (the fast-mode tail and the NameMC knobs live there). NameMC knobs have alpha 1, so they are
+    excluded by the alpha test. Unused pixels are preferred; overlay pixels are added only if needed."""
+    base, over = masks()
+    unused, clear_over = [], []
+    for y in range(H - 1):
+        for x in range(W):
+            if (x, y) in RESERVED or (x, y) in avoid or rgba[(y * W + x) * 4 + 3]:
+                continue
+            if (x, y) in base:
+                continue
+            (clear_over if (x, y) in over else unused).append((x, y))
+    return unused if len(unused) >= 16 else unused + clear_over
+
+
+def raw_pixel_diff(a, b):
+    """Pixels (x, y) whose RGBA differs between two raw scanline buffers."""
+    out = []
+    for y in range(H):
+        for x in range(W):
+            i = y * ROW + 1 + x * 4
+            if a[i:i + 4] != b[i:i + 4]:
+                out.append((x, y))
+    return out
+
+
+def gpu_search(rawp, k, outdir, args, rgba, ext, on_hit=None, tune_px=()):
     """True if the GPU search ran to completion, False if the caller should fall back.
     fastfinder --auto picks the largest K <= k and a value set that fits one SHA block.
     One value set holds only m! orderings (15! = 1.3e12 for K=5). When gpufinder exits 7
@@ -322,7 +351,30 @@ def gpu_search(rawp, k, outdir, args, rgba, ext, on_hit=None):
     tried_off, time_off, rolls = 0, 0.0, 0
     while True:
         dump_args = args if rolls == 0 else drop_seed(args)
-        r = subprocess.run([fast, rawp, str(k), outdir, *dump_args, "--auto", "--dump-job", job], stdout=subprocess.DEVNULL)
+        tune_args, tunedp, tunepix = [], os.path.join(outdir, "tuned.raw"), os.path.join(outdir, "tune.pix")
+        if rolls == 0 and tune_px:
+            # Length tuning happens once, in the first job. The tuned image replaces rawp, so rollovers
+            # (and the CPU fallback) keep the same tuned pixels; the value set is chosen after tuning.
+            with open(tunepix, "wb") as f:
+                f.write(struct.pack(f"<{len(tune_px)}I", *[y * ROW + 1 + x * 4 for x, y in tune_px]))
+            if os.path.exists(tunedp):
+                os.remove(tunedp)
+            tune_args = ["--tune-pixels", tunepix, "--tune-out", tunedp]
+        r = subprocess.run([fast, rawp, str(k), outdir, *dump_args, "--auto", "--dump-job", job, *tune_args],
+                           stdout=subprocess.DEVNULL)
+        if tune_args:
+            if os.path.exists(tunedp):
+                old, new = open(rawp, "rb").read(), open(tunedp, "rb").read()
+                changed = raw_pixel_diff(old, new)
+                if r.returncode == 0:
+                    os.replace(tunedp, rawp)
+                    print(f"length tuning pixels (alpha 0, invisible): {fmt_px(changed)}", flush=True)
+                else:
+                    os.remove(tunedp)
+            try:
+                os.remove(tunepix)
+            except OSError:
+                pass
         if r.returncode in INTERRUPT_CODES or r.returncode & 0xFFFFFFFF in INTERRUPT_CODES:
             stopped()
         if r.returncode != 0 or not os.path.exists(job):
@@ -351,6 +403,15 @@ def gpu_search(rawp, k, outdir, args, rgba, ext, on_hit=None):
         return True
 
 
+def reserved_change(base_rgba, rgba):
+    """First RESERVED pixel whose RGBA differs between the two images, or None."""
+    for x, y in sorted(RESERVED, key=lambda p: (p[1], p[0])):
+        i = (y * W + x) * 4
+        if rgba[i:i + 4] != base_rgba[i:i + 4]:
+            return x, y
+    return None
+
+
 def verify(base_rgba, found_path):
     data = open(found_path, "rb").read()
     want = os.path.splitext(os.path.basename(found_path))[0]
@@ -360,6 +421,9 @@ def verify(base_rgba, found_path):
     if mojang_png(rgba) != data:
         return False, "Python zlib re-encode differs from the searcher's bytes"
     base, over = masks()
+    r = reserved_change(base_rgba, rgba)
+    if r:
+        return False, f"change at reserved pixel ({r[0]},{r[1]})"
     for y in range(H):
         for x in range(W):
             i = (y * W + x) * 4
@@ -598,7 +662,8 @@ def mojang_search(path, targets, count=1, every=False, engine="auto", no_generic
     def launch(fargs, on_hit=None):
         if mode in ("gpu", "cpu"):
             if mode == "gpu":
-                r = gpu_search(rawp, k, outdir, fargs, orig, EXT, on_hit)
+                tp = tuning_pixels(rgba, set(wm) | set(tail_px) | MOJANG_TAIL) if LENGTH_TUNING and not unused_only else ()
+                r = gpu_search(rawp, k, outdir, fargs, orig, EXT, on_hit, tp)
                 if r:
                     return r
             print(f"fast mode: last {k} pixels", flush=True)
@@ -1116,6 +1181,11 @@ def cmd_pixels(args):
               + "; ".join(f"({x},{y}) {px_state(rgba, (x, y))}" for x, y in bad))
     else:
         print(f"  fast mode       eligible: all {k} tail pixels are invisible")
+    tp = tuning_pixels(rgba, set(wm) | set(tail) | MOJANG_TAIL)
+    print(f"  length tuning   {len(tp)} candidate pixels (alpha 0, unused first, never reserved): "
+          + (fmt_px(tp[:6]) + (", ..." if len(tp) > 6 else "") if tp else "none"))
+    print("                  GPU search only, and only if no one-block layout with K >= 5 exists:")
+    print("                  1-3 of them get a random RGB (alpha stays 0) to shift the compressed length")
     print("\nnamemc (3 pixels get alpha 1 and a counter as RGB)")
     for label, uo in (("default", False), ("--unused-only", True)):
         try:
@@ -1393,6 +1463,8 @@ def add_advanced(p):
     g = p.add_argument_group("Advanced")
     g.add_argument("--threads", metavar="N", type=int_range(1), help="CPU threads (default: all; the GPU ignores it)")
     g.add_argument("--seed", metavar="N", type=int_range(0), help="start seed of the search (default: random)")
+    g.add_argument("--no-length-tuning", action="store_true",
+                   help="Mojang GPU search: do not change 1-3 invisible pixels to reach a one-block SHA layout")
 
 
 def build_parser():
@@ -1539,6 +1611,8 @@ def main(argv=None):
         print(f"note: '{legacy}' is deprecated; use '{argv[0]}'", file=sys.stderr)
     args = build_parser().parse_args(argv)
     args.legacy = legacy
+    global LENGTH_TUNING
+    LENGTH_TUNING = not getattr(args, "no_length_tuning", False)
     return args.func(args)
 
 

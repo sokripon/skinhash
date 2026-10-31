@@ -404,7 +404,8 @@ The tool matches prefixes on those 16 digits, so `-z N` gives a NameMC link star
   ported from the CUDA finders.
 - Same safety checks: a GPU gate against CPU test vectors before every search, and a CPU check of every hit
   (ids, and only invisible pixels changed) before it's shown.
-- About 2.9G/s for Mojang links and 2.4G/s for NameMC on an RTX 5060 Ti in Chrome (~75-80% of native).
+- About 2.9G/s for Mojang links and 2.4G/s for NameMC on an RTX 5060 Ti in Chrome: ~60% of native for Mojang
+  (the fixed-bit-position kernel from step 7 isn't ported to WGSL yet) and ~77% for NameMC.
 
 Details and tests: [web/README.md](web/README.md).
 

@@ -238,6 +238,42 @@ try {
   const stopped = await page.evaluate(() => ({ phases: document.querySelector("#phasebox").textContent, hits: __skinhash.hits.length }));
   console.log("  stopped:", JSON.stringify(stopped));
   check(stopped.hits === 0 && /stopped/.test(stopped.phases) && /not run/.test(stopped.phases), "Both: Stop in phase 1 ends the run, phase 2 not started");
+
+  // ---------- import by username (jeb_ has a legacy 64x32 skin, so Dinnerbone is the 64x64 test player) ----------
+  await page.click("input[name=mode][value=mojang]");
+  await new Promise((r) => setTimeout(r, 300));
+  const nat = spawnSync("py", ["skinhash.py", "ids", "Dinnerbone"], { cwd: repo, encoding: "utf8" });
+  const natId = (nat.stdout.match(/^\s+Mojang\s+([0-9a-f]+)\s/m) || [])[1];
+  const natSkin = path.join(repo, "skins", "Dinnerbone.png");
+  check(!!natId && fs.existsSync(natSkin), `native: ids Dinnerbone -> ${natId?.slice(0, 16)}..., saved skins/Dinnerbone.png`);
+  await page.type("#player", "Dinnerbone");
+  await page.click("#importbtn");
+  await page.waitForFunction(() => __skinhash.name === "Dinnerbone" && __skinhash.prep, { timeout: 20000 });
+  const imp = await page.evaluate(() => ({ id: __skinhash.origId, eligible: __skinhash.prep.eligible, info: document.querySelector("#info").textContent, err: document.querySelector("#skinerr").hidden }));
+  check(imp.id === natId && /Player\s*Dinnerbone, classic/.test(imp.info) && imp.err, `import: page texture id equals native ids (${imp.id?.slice(0, 16)}...), info row "Dinnerbone, classic"`);
+  const ir = await runSearch("imported skin -p be", { prefixes: "be", suffixes: "", zeros: "0" }, 1);
+  check(!ir.err && ir.hits.length === 1 && ir.hits[0].id.startsWith("be"), "import: Mojang search prefix be, 1 hit");
+  await grab(ir);
+  if (ir.hits.length) {
+    const iv = spawnSync("py", ["skinhash.py", "verify", natSkin, path.join(outDir, ir.hits[0].id + ".png")], { cwd: repo, encoding: "utf8" });
+    check(iv.status === 0 && /^OK/.test(iv.stdout), `import: skinhash.py verify <downloaded skin> <hit>: ${iv.stdout.trim().slice(0, 80)}`);
+  }
+  // errors keep the previous skin
+  const errCase = async (q, re) => {
+    await page.$eval("#player", (el, v) => { el.value = v; }, q);
+    await page.click("#importbtn");
+    await page.waitForFunction(() => !document.querySelector("#skinerr").hidden, { timeout: 20000 });
+    const e = await page.evaluate(() => ({ msg: document.querySelector("#skinerr").textContent, name: __skinhash.name, id: __skinhash.origId }));
+    check(re.test(e.msg) && e.name === "Dinnerbone" && e.id === natId, `import error "${q}": "${e.msg}", previous skin kept`);
+  };
+  await errCase("Zq9_xK3vLm2PwQ7a", /No Minecraft player/);
+  await errCase("jeb_", /legacy 64x32/);
+  // picking a file afterwards still works
+  await page.$eval("#file", (el) => { el.value = ""; });
+  await input.uploadFile(skin);
+  await page.waitForFunction((n) => __skinhash.name === n, { timeout: 10000 }, path.basename(skin, ".png"));
+  const back = await page.evaluate(() => ({ err: document.querySelector("#skinerr").hidden, info: document.querySelector("#info").textContent }));
+  check(back.err && !/Player/.test(back.info), "import: picking a file afterwards replaces the imported skin");
 } catch (e) {
   console.log("TEST ERROR:", e.message); failures++;
 } finally {

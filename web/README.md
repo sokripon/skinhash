@@ -73,11 +73,13 @@ pako before it is shown.
     node web/test/png_decode.mjs   # PNG decoder vs Pillow (needs `py` + Pillow)
     node web/test/job.mjs          # job builder, self-test, rollover, eligibility
     node web/test/namemc.mjs       # NameMC ids, JS reference vs Python hashlib
-    node web/test/browser_test.mjs # Chrome + WebGPU end to end (Mojang and NameMC modes, combined flow), checks the downloads with skinhash.py and namemc_check.py
+    node web/test/browser_test.mjs # Chrome + WebGPU end to end (Mojang and NameMC modes, combined flow), checks the downloads with skinhash.py and namemc_check.py; also imports Dinnerbone by name (a few playerdb/Mojang lookups)
 
 `browser_test.mjs` needs `puppeteer-core`, which is deliberately not in this repo: install it in a scratch
 folder and set `WEBTEST_DIR` to that folder.
 
 On start the page loads classic Steve (texture `1a4af718…`) from textures.minecraft.net, which allows cross-origin requests, and checks that the bytes hash to that id. The texture isn't bundled. Dropping or choosing your own skin replaces it. Offline, the page simply starts empty.
+
+Import by username: next to the drop zone, "Username or UUID" + Load (Enter works) also takes a texture id or URL. Mojang's APIs send no CORS headers, so the page looks the player up through playerdb.co (fallback api.ashcon.app); this is the only third-party dependency, and only for the lookup. The skin itself comes from textures.minecraft.net and its SHA-256 must equal the texture id, so a wrong answer cannot yield a different skin. Errors (not found, no custom skin, legacy 64x32 skin, rate-limited, network) show in the skin error box and keep the current skin. The native tool does the same with `py skinhash.py mojang <name> ...` (see the main README, "Skin input").
 
 All tests use `skins/steve.png` plus skins generated inside the tests.

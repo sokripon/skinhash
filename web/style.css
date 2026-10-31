@@ -37,6 +37,8 @@ input.small { width: 5em; padding: 4px 6px; }
 button { font: inherit; padding: 9px 16px; border-radius: 8px; border: 1px solid var(--line); background: var(--card); color: var(--fg); cursor: pointer; }
 button.primary { background: var(--accent); color: var(--accent-fg); border-color: var(--accent); }
 button:disabled { opacity: .45; cursor: default; }
+.import { flex-wrap: nowrap; gap: 8px; margin-bottom: 0; } .import input { flex: 1; min-width: 0; }
+.hint { font-size: .8rem; margin-bottom: 4px; }
 .muted { color: var(--muted); font-size: .9rem; }
 .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 8px; }
 .stats div { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; }

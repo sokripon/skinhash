@@ -7,6 +7,7 @@ import { parseHexList, targetList, targetKey, gpuTargets, gpuNmTargets, expected
 import { verifyHit, verifyNmHit, verifyBoth } from "./verify.js";
 import { prepareNameMc, makeNmTests, namemcIdHex } from "./namemc.js";
 import { NmGpuJob } from "./nmgpu.js";
+import { resolveSkin, ImportError } from "./import.js";
 
 const $ = (id) => document.getElementById(id);
 const S = { rates: {}, phases: [], mode: "mojang", nprep: null, prep: null, orig: null, name: "skin", running: false, stop: false, gpu: null, hits: [], gate: null, bench: null, log: [] };
@@ -40,6 +41,7 @@ function renderInfo() {
   const { prep } = S;
   const k = S.chosenK || prep.kmaxUsable;
   const rows = [];
+  if (S.player) rows.push(["Player", `${S.player.name.replace(/[<>&]/g, "")}, ${S.player.slim ? "slim" : "classic"}`]);
   rows.push(["Texture id", `<code>${S.origId}</code>`]);
   rows.push(["NameMC id", `<code>${S.origNm}</code>`]);
   if (S.mode === "namemc") {
@@ -62,6 +64,7 @@ function renderInfo() {
 
 function loadSkinBytes(bytes, name, keepHits = false, internal = false) {
   showErr("skinerr", "");
+  S.player = S.nextPlayer || null; S.nextPlayer = null;
   let dec;
   try { dec = decodePng(bytes); } catch (e) { showErr("skinerr", e.message); S.prep = null; $("skinbox").hidden = $("targetsec").hidden = true; return; }
   S.orig = dec.rgba; S.name = name.replace(/\.png$/i, "");
@@ -90,6 +93,22 @@ async function pick(file) {
   S.userPicked = true;
   loadSkinBytes(new Uint8Array(await file.arrayBuffer()), file.name);
 }
+
+// Import by username / UUID / texture id (playerdb.co lookup, skin from textures.minecraft.net, hash checked).
+async function importPlayer() {
+  const q = $("player").value;
+  if (S.running || S.importing || !q.trim()) return;
+  S.importing = true; showErr("skinerr", ""); updateButtons();
+  try {
+    const r = await resolveSkin(q);
+    S.userPicked = true;
+    S.nextPlayer = r.uuid ? { name: r.name, slim: r.slim } : null;
+    loadSkinBytes(r.bytes, r.name);
+  } catch (e) {
+    showErr("skinerr", e instanceof ImportError ? e.message : "Import failed: " + (e.message || e));
+  } finally { S.importing = false; updateButtons(); }
+}
+$("importform").addEventListener("submit", (e) => { e.preventDefault(); importPlayer(); });
 
 // Default skin: classic Steve, fetched from Mojang (CORS allowed) instead of bundling Mojang's asset.
 // The bytes must hash to the texture id; a skin the user picks meanwhile always wins.
@@ -166,6 +185,7 @@ function updateExpect() {
 [...NM_IDS, ...MJ_IDS].forEach((id) => $(id).addEventListener("input", updateExpect));
 
 function updateButtons() {
+  $("importbtn").disabled = S.running || !!S.importing;
   const ok = !!(S.mode === "namemc" ? S.nprep?.eligible : S.mode === "both" ? (S.nprep?.eligible && S.prep?.eligible) : S.prep?.eligible) && !S.running;
   $("start").disabled = !ok; $("bench").disabled = !ok || S.mode === "both"; $("stop").disabled = !S.running;
 }

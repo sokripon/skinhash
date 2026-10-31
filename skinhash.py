@@ -5,6 +5,12 @@ id looks cool.
   py skinhash.py COMMAND --help   options and examples of one command
 
 Commands: mojang, namemc, both (searches), ids, verify, detect, pixels, bench.
+
+Every argument that takes a skin accepts a PNG path, a texture id or textures.minecraft.net URL, a
+UUID or a Minecraft username (looked up with the Mojang API, saved as skins/<name>.png), e.g.
+  py skinhash.py mojang jeb_ -p c0ffee
+  py skinhash.py ids 853c80ef-3c37-49fd-aa49-938b674adae6
+Prefixes name:, uuid: and texture: force the interpretation.
 The searches drive the native finders (hashfinder, fastfinder, gpufinder, namemcfinder, namemcgpu,
 built with build.ps1) and verify every hit. See README.md and docs/how-it-works.md.
 """
@@ -668,19 +674,209 @@ def namemc_search(path, targets, count=1, every=False, engine="auto", unused_onl
 
 
 # ---- other commands ----------------------------------------------------------------------------
-def fetch_skin(t):
-    """(bytes, label) of a file, a texture id or a textures.minecraft.net URL. ValueError on failure."""
-    if os.path.exists(t):
-        return open(t, "rb").read(), t
+NAME_URL2 = "https://api.minecraftservices.com/minecraft/profile/lookup/name/"
+SESSION_URL = "https://sessionserver.mojang.com/session/minecraft/profile/"
+NAME_URL = "https://api.mojang.com/users/profiles/minecraft/"
+SKINS_DIR = os.path.join(HERE, "skins")
+UUID_RE = re.compile(r"[0-9a-fA-F]{8}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{12}")
+NAME_RE = re.compile(r"[A-Za-z0-9_]{3,16}")
+
+
+def classify(spec):
+    """(kind, value) of a skin argument; kind is file, texture, uuid or name. An existing file always
+    wins. Then: explicit prefix, textures.minecraft.net URL, UUID (32 hex or dashed), texture id
+    (33-64 hex), username (3-16 of A-Za-z0-9_). A short hex word such as 'cafe' is a username; write
+    texture:<id> for a texture id shorter than 33 digits."""
+    if os.path.exists(spec):
+        return "file", spec
+    for pre in ("name", "uuid", "texture"):
+        if spec.lower().startswith(pre + ":"):
+            return pre, spec[len(pre) + 1:].strip()
+    if "/" in spec:
+        return "texture", spec
+    if UUID_RE.fullmatch(spec):
+        return "uuid", spec
+    if re.fullmatch(r"[0-9a-fA-F]{33,64}", spec):
+        return "texture", spec
+    if NAME_RE.fullmatch(spec):
+        return "name", spec
+    raise ValueError(f"{spec}: not a file, texture id, textures.minecraft.net URL, UUID or username")
+
+
+def http_get(url, what):
+    """Body of a GET, or None for 204/404. ValueError (clean message) for 429 and network errors."""
+    import urllib.error
     import urllib.request
-    tid = t.rstrip("/").rsplit("/", 1)[-1].lower()
-    if not re.fullmatch(r"[0-9a-f]{1,64}", tid):
-        raise ValueError(f"{t}: not a file, a texture id or a textures.minecraft.net URL")
-    url = SKIN_URL + tid
     try:
-        return urllib.request.urlopen(url, timeout=20).read(), url
-    except OSError as e:
-        raise ValueError(f"{url}: download failed ({e})")
+        req = urllib.request.Request(url, headers={"User-Agent": "skinhash"})
+        with urllib.request.urlopen(req, timeout=20) as r:
+            return None if r.status == 204 else r.read()
+    except urllib.error.HTTPError as e:
+        if e.code in (404, 204):
+            return None
+        if e.code == 429:
+            raise ValueError(f"{what}: rate-limited, try again in a minute")
+        raise ValueError(f"{what}: HTTP {e.code}")
+    except (OSError, ValueError) as e:
+        raise ValueError(f"{what}: network error ({getattr(e, 'reason', e)})")
+
+
+def download_texture(tid):
+    """The skin bytes of a texture id; the sha256 must equal the id."""
+    tid = tid.lower()
+    data = http_get(SKIN_URL + tid, "textures.minecraft.net")
+    if data is None:
+        raise ValueError(f"texture {tid}: not found")
+    if texture_id(data) != tid:
+        raise ValueError(f"texture {tid}: downloaded bytes do not hash to the texture id")
+    return data
+
+
+CACHE_FILE = os.path.join(SKINS_DIR, ".lookups.json")
+CACHE_TTL = 600  # seconds; Mojang allows roughly one profile request per UUID per minute
+
+
+def cache_load():
+    import json
+    try:
+        with open(CACHE_FILE, encoding="utf8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+
+def cache_store(cache):
+    import json
+    try:
+        os.makedirs(SKINS_DIR, exist_ok=True)
+        with open(CACHE_FILE, "w", encoding="utf8") as f:
+            json.dump(cache, f)
+    except OSError:
+        pass
+
+
+def lookup_player(kind, value):
+    """(name, uuid, texture id, slim) from the Mojang API. ValueError if unknown or no custom skin.
+    Results are cached in skins/.lookups.json for 10 minutes (and reused when Mojang rate-limits)."""
+    import base64
+    import json
+    import time
+    cache = cache_load()
+    key = (value.lower() if kind == "name" else value.replace("-", "").lower())
+    hit = cache.get(("n:" if kind == "name" else "u:") + key)
+    if hit and time.time() - hit["t"] < CACHE_TTL:
+        return hit["name"], hit["uuid"], hit["tid"], hit["slim"]
+    try:
+        if kind == "name":
+            try:
+                body = http_get(NAME_URL + value, "api.mojang.com")
+            except ValueError:  # 5xx or rate limit: the same lookup on the other official host
+                body = http_get(NAME_URL2 + value, "api.minecraftservices.com")
+            if body is None:
+                raise ValueError(f"unknown Minecraft username '{value}'")
+            uuid = json.loads(body)["id"]
+        else:
+            uuid = key
+        body = http_get(SESSION_URL + uuid, "sessionserver.mojang.com")
+    except ValueError as e:
+        if hit and not str(e).startswith("unknown"):
+            return hit["name"], hit["uuid"], hit["tid"], hit["slim"]  # rate-limited or offline: stale answer
+        raise
+    if body is None:
+        raise ValueError(f"unknown UUID {value}")
+    prof = json.loads(body)
+    name = prof.get("name", value)
+    tex = next((p for p in prof.get("properties", []) if p.get("name") == "textures"), None)
+    skin = None
+    if tex:
+        skin = json.loads(base64.b64decode(tex["value"])).get("textures", {}).get("SKIN")
+    if not skin:
+        raise ValueError(f"{name} ({uuid}) has no custom skin (default Steve/Alex)")
+    slim = (skin.get("metadata") or {}).get("model") == "slim"
+    tid = skin["url"].rstrip("/").rsplit("/", 1)[-1].lower()
+    rec = {"t": time.time(), "name": name, "uuid": uuid, "tid": tid, "slim": slim}
+    cache["u:" + uuid] = rec
+    cache["n:" + name.lower()] = rec
+    cache_store(cache)
+    return name, uuid, tid, slim
+
+
+def shown(path):
+    try:
+        return os.path.relpath(path)
+    except ValueError:
+        return path
+
+
+def save_skin(base, data):
+    os.makedirs(SKINS_DIR, exist_ok=True)
+    path = os.path.join(SKINS_DIR, re.sub(r"[^A-Za-z0-9_.-]", "_", base) + ".png")
+    if os.path.basename(path).lower() == "steve.png":
+        path = os.path.join(SKINS_DIR, "steve_player.png")  # never overwrite the example skin
+    with open(path, "wb") as f:
+        f.write(data)
+    return path
+
+
+def check_size(data, label):
+    import io
+    try:
+        size = Image.open(io.BytesIO(data)).size
+    except Exception as e:
+        raise ValueError(f"{label}: not an image ({e})")
+    if size == (64, 32):
+        raise ValueError(f"{label}: legacy 64x32 skin; this tool needs a 64x64 skin")
+    if size != (W, H):
+        raise ValueError(f"{label}: not a 64x64 skin ({size[0]}x{size[1]})")
+
+
+def texture_arg_id(spec, value):
+    tid = value.rstrip("/").rsplit("/", 1)[-1].lower()
+    if not re.fullmatch(r"[0-9a-f]{1,64}", tid):
+        raise ValueError(f"{spec}: not a texture id or a textures.minecraft.net URL")
+    return tid
+
+
+def import_skin(spec, quiet=False):
+    """Resolve a file, name, UUID or texture id/URL to a saved PNG. Returns (path, bytes).
+    Prints one line: name, UUID, classic/slim, texture id, saved path."""
+    kind, value = classify(spec)
+    if kind == "file":
+        return value, open(value, "rb").read()
+    if kind == "texture":
+        tid = texture_arg_id(spec, value)
+        data = download_texture(tid)
+        check_size(data, tid)
+        path = save_skin(tid[:16], data)
+        if not quiet:
+            print(f"texture {tid}  saved {shown(path)}")
+        return path, data
+    name, uuid, tid, slim = lookup_player(kind, value)
+    data = download_texture(tid)
+    check_size(data, f"{name}'s skin")
+    path = save_skin(name, data)
+    if not quiet:
+        print(f"{name}  {uuid}  {'slim' if slim else 'classic'}  {tid}  saved {shown(path)}")
+    return path, data
+
+
+def skin_path(spec):
+    """A path to a skin PNG for a skin argument (see classify). Exits cleanly on errors."""
+    try:
+        return import_skin(spec)[0]
+    except ValueError as e:
+        sys.exit(f"error: {e}")
+
+
+def fetch_skin(t, quiet=False):
+    """(bytes, label) of a file, texture id/URL, UUID or username. ValueError on failure.
+    Players are saved to skins/<name>.png; plain texture ids are only downloaded."""
+    kind, value = classify(t)
+    if kind == "texture":
+        tid = texture_arg_id(t, value)
+        return download_texture(tid), SKIN_URL + tid
+    path, data = import_skin(t, quiet)
+    return data, path
 
 
 def decode_skin(data, label):
@@ -690,6 +886,8 @@ def decode_skin(data, label):
         im.load()
     except Exception as e:
         raise ValueError(f"{label}: not an image ({e})")
+    if im.size == (64, 32):
+        raise ValueError(f"{label}: legacy 64x32 skin; this tool needs a 64x64 skin")
     if im.size != (W, H):
         raise ValueError(f"{label}: not a 64x64 skin ({im.size[0]}x{im.size[1]})")
     return bytearray(im.convert("RGBA").tobytes())
@@ -714,7 +912,7 @@ def cmd_ids(args):
     bad = 0
     for t in args.inputs:
         try:
-            data, label = fetch_skin(t)
+            data, label = fetch_skin(t, quiet=args.legacy == "predict")
             rgba = decode_skin(data, label)
         except ValueError as e:
             print(f"error: {e}", file=sys.stderr)
@@ -733,13 +931,13 @@ def cmd_ids(args):
 
 
 def cmd_verify(args):
-    ok, msg = verify(load_rgba(args.original), args.result)
+    ok, msg = verify(load_rgba(skin_path(args.original)), args.result)
     print("OK" if ok else "FAIL", msg)
     return 0 if ok else 1
 
 
 def cmd_pixels(args):
-    path, k = args.skin, args.tail_pixels
+    path, k = skin_path(args.skin), args.tail_pixels
     orig = load_rgba(path)
     print(f"{path}: Mojang id {texture_id(mojang_png(orig))}, NameMC id {namemc_id(orig)}")
     rgba = bytearray(orig)
@@ -780,7 +978,7 @@ def cmd_pixels(args):
 
 def cmd_bench(args):
     global LAST_RATE, GPU_FAILED
-    skin = args.skin
+    skin = skin_path(args.skin)
     gpu_here = os.path.exists(exe("gpufinder")) and os.path.exists(exe("namemcgpu"))
     engines = [args.engine] if args.engine else (["gpu", "cpu"] if gpu_here else ["cpu"])
     if "gpu" in engines and not gpu_here:
@@ -832,6 +1030,7 @@ def default_out(args, suffix=""):
 def cmd_mojang(args):
     targets = targets_from(args.prefix, args.suffix, args.zeros)
     check_search_options(args.parser, args, bool(targets))
+    args.skin = skin_path(args.skin)
     mojang_search(args.skin, targets, args.count, args.every_target, args.engine, args.no_generic,
                   args.unused_only, args.tail_pixels, default_out(args), not args.no_watermark,
                   args.threads, args.seed)
@@ -841,6 +1040,7 @@ def cmd_mojang(args):
 def cmd_namemc(args):
     targets = targets_from(args.prefix, args.suffix, args.zeros)
     check_search_options(args.parser, args, bool(targets))
+    args.skin = skin_path(args.skin)
     namemc_search(args.skin, targets, args.count, args.every_target, args.engine, args.unused_only,
                   default_out(args, "_namemc"), not args.no_watermark, args.threads, args.seed)
     return 0
@@ -851,6 +1051,7 @@ def cmd_both(args):
     mj_t = targets_from(args.mojang_prefix, args.mojang_suffix, args.mojang_zeros)
     check_search_options(args.parser, args, bool(nm_t or mj_t),
                          "use --namemc-prefix/-suffix/-zeros and/or --mojang-prefix/-suffix/-zeros")
+    args.skin = skin_path(args.skin)
     outdir = default_out(args, "_both")
     orig = load_rgba(args.skin)
     wm = not args.no_watermark
@@ -960,8 +1161,12 @@ def add_deprecated(g, kind):
         g.add_argument("--k", action=Deprecated, dest="tail_pixels", type=int_range(1, 20), new="--tail-pixels")
 
 
+SKIN_HELP = ("a 64x64 skin PNG (e.g. skins/steve.png), a texture id or URL, a UUID or a Minecraft "
+             "username (saved as skins/<name>.png). Prefixes name:, uuid:, texture: force the meaning.")
+
+
 def add_skin(p):
-    p.add_argument("skin", metavar="SKIN", help="the skin PNG, 64x64 (e.g. skins/steve.png)")
+    p.add_argument("skin", metavar="SKIN", help=SKIN_HELP)
 
 
 def add_targets(p, kind):
@@ -1040,6 +1245,7 @@ def build_parser():
         description="Find invisible variations of a Minecraft skin whose Mojang texture id and/or NameMC id looks cool.",
         epilog="examples:\n"
                "  py skinhash.py mojang skins/steve.png -p c0ffee\n"
+               "  py skinhash.py mojang jeb_ -p c0ffee            (a username or UUID works as the skin)\n"
                "  py skinhash.py both skins/steve.png --namemc-prefix beef --mojang-prefix cafe\n"
                "  py skinhash.py verify skins/steve.png found/steve/<id>.png\n\n"
                "Run 'py skinhash.py COMMAND --help' for the options of one command.\n"
@@ -1056,7 +1262,8 @@ def build_parser():
     p = command("mojang", "Search for a Mojang texture link (textures.minecraft.net/texture/...) that looks cool.",
                 "  py skinhash.py mojang skins/steve.png -p c0ffee\n"
                 "  py skinhash.py mojang skins/steve.png -z 9 -n 3 -o out/steve\n"
-                "  py skinhash.py mojang skins/steve.png -s dead --engine cpu --no-generic")
+                "  py skinhash.py mojang skins/steve.png -s dead --engine cpu --no-generic\n"
+                "  py skinhash.py mojang jeb_ -p c0ffee            (username; also a UUID or texture id)")
     add_skin(p)
     add_targets(p, "mojang")
     add_stopping(p)
@@ -1070,7 +1277,8 @@ def build_parser():
     p = command("namemc", "Search for a NameMC skin page (namemc.com/skin/...) whose id looks cool.",
                 "  py skinhash.py namemc skins/steve.png -p beef\n"
                 "  py skinhash.py namemc skins/steve.png -z 6 -n 3\n"
-                "  py skinhash.py namemc skins/steve.png -p dead -s cafe --every-target --engine cpu")
+                "  py skinhash.py namemc skins/steve.png -p dead -s cafe --every-target --engine cpu\n"
+                "  py skinhash.py namemc jeb_ -p beef")
     add_skin(p)
     add_targets(p, "namemc")
     add_stopping(p)
@@ -1084,7 +1292,8 @@ def build_parser():
     p = command("both", "Search for a NameMC id and a Mojang texture id on one skin: NameMC first, then Mojang on that hit.",
                 "  py skinhash.py both skins/steve.png --namemc-prefix beef --mojang-prefix cafe\n"
                 "  py skinhash.py both skins/steve.png --namemc-zeros 6 --mojang-zeros 9\n"
-                "  py skinhash.py both skins/steve.png --mojang-prefix c0ffee     (only the Mojang phase)")
+                "  py skinhash.py both skins/steve.png --mojang-prefix c0ffee     (only the Mojang phase)\n"
+                "  py skinhash.py both jeb_ --namemc-prefix beef --mojang-prefix cafe")
     add_skin(p)
     g = p.add_argument_group("NameMC targets (phase 1; fixed 16 digits, prefixes may start with 0)")
     g.add_argument("--namemc-prefix", metavar="HEX", type=hex_arg, action="append", help="NameMC id starts with HEX. Repeatable.")
@@ -1104,28 +1313,29 @@ def build_parser():
     p = command("ids", "Print the Mojang texture id and the NameMC id of skins, with both links.",
                 "  py skinhash.py ids skins/steve.png\n"
                 "  py skinhash.py ids found/steve/<id>.png\n"
-                "  py skinhash.py ids https://textures.minecraft.net/texture/<id>")
-    p.add_argument("inputs", metavar="FILE|ID|URL", nargs="+",
-                   help="skin PNG files, or Mojang texture ids / textures.minecraft.net URLs (downloaded)")
+                "  py skinhash.py ids https://textures.minecraft.net/texture/<id>\n"
+                "  py skinhash.py ids jeb_ 853c80ef-3c37-49fd-aa49-938b674adae6")
+    p.add_argument("inputs", metavar="SKIN", nargs="+", help=SKIN_HELP)
     p.set_defaults(func=cmd_ids)
 
     p = command("verify", "Check that RESULT looks identical to ORIGINAL in game and hashes to its file name.",
                 "  py skinhash.py verify skins/steve.png found/steve/<id>.png\n"
                 "  py skinhash.py verify skins/steve.png found/steve_both/<id>.png     (also NameMC and both results)")
-    p.add_argument("original", metavar="ORIGINAL", help="the skin you started from")
+    p.add_argument("original", metavar="ORIGINAL", help="the skin you started from (file, texture id/URL, UUID or username)")
     p.add_argument("result", metavar="RESULT", help="a hit file, named <id>.png")
     p.set_defaults(func=cmd_verify)
 
     p = command("detect", "Check whether skins were made by skinhash (the invisible watermark).",
                 "  py skinhash.py detect found/steve/<id>.png\n"
-                "  py skinhash.py detect https://textures.minecraft.net/texture/<id>")
-    p.add_argument("inputs", metavar="FILE|ID|URL", nargs="+",
-                   help="skin PNG files, or Mojang texture ids / URLs (downloaded)")
+                "  py skinhash.py detect https://textures.minecraft.net/texture/<id>\n"
+                "  py skinhash.py detect jeb_")
+    p.add_argument("inputs", metavar="SKIN", nargs="+", help=SKIN_HELP)
     p.set_defaults(func=cmd_detect)
 
     p = command("pixels", "Show which pixels each search mode would change on a skin, and whether fast mode is possible.",
                 "  py skinhash.py pixels skins/steve.png\n"
-                "  py skinhash.py pixels skins/me.png --tail-pixels 5")
+                "  py skinhash.py pixels skins/me.png --tail-pixels 5\n"
+                "  py skinhash.py pixels jeb_")
     add_skin(p)
     p.add_argument("--tail-pixels", metavar="N", type=int_range(1, 20), default=6,
                    help="size of the fast-mode tail to check (default 6)")
@@ -1137,7 +1347,7 @@ def build_parser():
                 "  py skinhash.py bench --engine gpu\n"
                 "  py skinhash.py bench skins/me.png --engine cpu --threads 8")
     p.add_argument("skin", metavar="SKIN", nargs="?", default=os.path.join(HERE, "skins", "steve.png"),
-                   help="skin to benchmark on (default skins/steve.png)")
+                   help="skin to benchmark on (default skins/steve.png); also a username, UUID or texture id")
     p.add_argument("--engine", choices=["gpu", "cpu"],
                    help="benchmark only this engine (default: GPU if built, then CPU). Runs the Mojang and the NameMC search.")
     add_advanced(p)

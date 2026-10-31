@@ -24,6 +24,11 @@
       <input id="file" type="file" accept="image/png">
       <span>Drop a 64&times;64 skin PNG, or tap to choose one</span>
     </label>
+    <form id="importform" class="row import">
+      <input id="player" type="text" placeholder="Username or UUID" aria-label="Username or UUID" autocomplete="off" spellcheck="false">
+      <button id="importbtn" type="submit">Load</button>
+    </form>
+    <div class="muted hint">via playerdb.co</div>
     <div id="skinerr" class="box err" hidden></div>
     <div id="skinbox" hidden>
       <div class="preview">

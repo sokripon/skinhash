@@ -22,6 +22,7 @@ py skinhash.py mojang skins/me.png -p c0ffee        # Mojang link starting with 
 py skinhash.py namemc skins/me.png -p beef          # NameMC page starting with beef
 py skinhash.py both   skins/me.png --namemc-prefix beef --mojang-prefix cafe
 py skinhash.py ids    skins/me.png                  # both ids and links of a skin
+py skinhash.py mojang jeb_ -p c0ffee                # a username or UUID works as the skin too
 py skinhash.py verify skins/me.png found/me/<id>.png
 ```
 
@@ -32,11 +33,39 @@ py skinhash.py verify skins/me.png found/me/<id>.png
 | `mojang SKIN` | search for a Mojang texture link |
 | `namemc SKIN` | search for a NameMC skin page |
 | `both SKIN` | NameMC search, then Mojang search on its hit |
-| `ids FILE\|ID\|URL...` | Mojang texture id and NameMC id of skins |
+| `ids SKIN...` | Mojang texture id and NameMC id of skins |
 | `verify ORIGINAL RESULT` | check a hit against the skin it came from |
-| `detect FILE\|ID\|URL...` | is the skin watermarked by skinhash |
+| `detect SKIN...` | is the skin watermarked by skinhash |
 | `pixels SKIN` | which pixels each mode would change |
 | `bench` | 10 s benchmark of the engines |
+
+### Skin input
+
+Every argument that takes a skin (`SKIN`, `ORIGINAL`, the `ids` and `detect` inputs) accepts, in this order:
+
+1. a PNG path (an existing file always wins),
+2. an explicit `name:`, `uuid:` or `texture:` prefix, which forces that meaning,
+3. a `textures.minecraft.net` URL (anything with a `/`),
+4. a UUID (32 hex digits or dashed),
+5. a texture id (33 to 64 hex digits),
+6. a username (3-16 of `A-Za-z0-9_`).
+
+A short hex word such as `cafe` is therefore a username; write `texture:<id>` for a texture id under 33 digits.
+A name or UUID is resolved with the official Mojang APIs (`api.mojang.com`, falling back to
+`api.minecraftservices.com`, then `sessionserver.mojang.com`). The skin is downloaded from
+`textures.minecraft.net` and its SHA-256 must equal the texture id. It is saved as `skins/<name>.png` (a texture id
+as `skins/<id16>.png`; `steve.png` is never overwritten) and one line is printed: name, UUID, classic/slim, texture
+id, saved path. Searches then write to `found/<name>/` as usual. Lookups are cached for 10 minutes in
+`skins/.lookups.json` because Mojang limits profile requests to about one per minute per UUID.
+
+```
+py skinhash.py mojang jeb_ -p c0ffee
+py skinhash.py ids 853c80ef-3c37-49fd-aa49-938b674adae6
+py skinhash.py ids uuid:853c80ef3c3749fdaa49938b674adae6
+```
+
+Errors are one line: unknown name or UUID, a player without a custom skin, a legacy 64x32 skin (the tool needs
+64x64; `jeb_` has one), a network error, or "rate-limited, try again in a minute" (HTTP 429).
 
 Options shared by the search commands (`mojang`, `namemc`, `both`):
 

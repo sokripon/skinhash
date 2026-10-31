@@ -453,7 +453,9 @@ static void self_test(uint64_t *rng) {
  *  - the R values left over (ascending value index) fill the last R positions in the t-th lexicographic
  *    permutation of 0..R-1.
  * The GPU enumerates the t's in the inner loop and caches everything that depends only on `outer`. */
+#ifndef GPU_R
 #define GPU_R 4
+#endif
 static int perm_m(void) { return g_n < 20 ? g_n : 20; }
 static int inner_r(void) { return perm_m() < GPU_R ? perm_m() : GPU_R; }
 static uint64_t fact_u(int r) { uint64_t f = 1; for (int i = 2; i <= r; i++) f *= (uint64_t)i; return f; }

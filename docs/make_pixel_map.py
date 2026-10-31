@@ -35,7 +35,7 @@ PARTS = [
 def main():
     base, over = skinhash.masks()
     wm = {(x, 0) for x in range(len(skinhash.wm_pixels(skinhash.WATERMARKS[skinhash.WATERMARK_VERSION])))}
-    fast = {(x, 63) for x in range(58, 64)}
+    fast = {(x, 63) for x in range(58, 64)}  # last 5 (GPU, 1 SHA block) or 6 (CPU)
     W, H = OX * 2 + GRID + 250, OY + GRID + 40
     out = [f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {W} {H}" width="{W}" height="{H}" '
            f'font-family="Segoe UI, Helvetica, Arial, sans-serif">',
@@ -63,7 +63,7 @@ def main():
     fx = OX + 61 * C
     out.append(f'<path d="M{fx} {OY + GRID} L{fx} {OY + GRID + 14}" stroke="#c0282d" stroke-width="1.5"/>')
     out.append(f'<text x="{fx}" y="{OY + GRID + 28}" font-size="11" text-anchor="end" fill="#c0282d">'
-               'fast-mode pixels (58,63)–(63,63)</text>')
+               'fast-mode pixels: last 5 (GPU) or 6 (CPU) of row 63</text>')
     # legend
     lx, ly = OX + GRID + 28, OY + 6
     legend = [

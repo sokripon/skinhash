@@ -25,7 +25,8 @@ If you change any pixel, you get a completely different, unpredictable id. Findi
 - **Overlay layer (purple):** drawn with transparency. A pixel with alpha 0 shows nothing, whatever its RGB, and Mojang keeps that RGB (verified by a real upload).
 - **Unused (grey):** no part of the player model samples these pixels.
 - **Watermark (orange):** 6 transparent unused pixels whose RGB bytes spell `sokripon skinhash` + a version byte. Check a skin with `py skinhash.py detect`.
-- **Search pixels (red):** the fast modes vary the RGB of the last 6 pixels of the file. On this skin they are transparent sleeve-overlay pixels. Their alpha stays 0, so they stay invisible.
+- **Search pixels (red):** the fast modes vary the RGB of the last pixels of the file: 5 on the GPU, (59–63, 63), chosen so the changing bytes fit one SHA block; 6 on the CPU, (58–63, 63). On this skin they are transparent sleeve-overlay pixels. Their alpha stays 0, so they stay invisible.
+- **Generic mode** (`--generic`, or skins whose last pixels are visible) writes a counter into the RGB of the last 3 invisible pixels it finds. With `--unused-only` it only uses pixels no model face samples at all.
 
 `verify` re-checks every hit: the file hashes to its name, real zlib reproduces it byte for byte, and no visible pixel differs from the original.
 
@@ -38,7 +39,7 @@ Re-compressing the whole skin for every candidate is slow, about 170k tries/s. F
 1. It fills the search pixels with byte values that occur **nowhere else** in the image. zlib can't match them against earlier data, so they always come out as plain literals.
 2. Each candidate is a **reordering** of the same values. The symbol frequencies don't change, so the Huffman tables, the compressed size and every bit before the tail are identical for all candidates.
 3. Only the last ~50 bytes of the file change: the tail literal codes, the Adler-32 and the CRC-32.
-4. SHA-256 processes 64-byte blocks, so the ~55 fixed blocks are hashed once into a saved midstate. Each candidate then only finishes the last 1–2 blocks.
+4. SHA-256 processes 64-byte blocks, so the ~55 fixed blocks are hashed once into a saved midstate. Each candidate then only finishes the last block (the job builder picks a pixel count that makes the changing bytes fit into one).
 
 The result is the same file real zlib would produce, built with a few dozen bit operations. A start-up self-test compares 1000 random candidates against real zlib, and every hit is rebuilt and checked again.
 
@@ -50,16 +51,17 @@ The result is the same file real zlib would produce, built with a few dozen bit 
 |---|---|---|
 | Generic (CPU) | `--generic` | ~170k/s |
 | Fast mode (CPU) | default | ~43M/s |
-| Fast mode (GPU) | `--gpu` | ~1.25G/s (optimization in progress) |
+| Fast mode (GPU) | `--gpu` | ~3.85G/s |
 
 Each extra leading zero takes 16× longer on average:
 
-| Target | GPU at 1.25G/s |
+| Target | GPU at 3.85G/s |
 |---|---|
-| 8-char hex word | ~3 s |
-| 9 zeros | ~1 min |
-| 10 zeros | ~15 min |
-| 11 zeros | ~4 h |
+| 8-char hex word | ~1 s |
+| 9 zeros | ~18 s |
+| 10 zeros | ~5 min |
+| 11 zeros | ~75 min |
+| 12 zeros | ~20 h |
 
 ---
 

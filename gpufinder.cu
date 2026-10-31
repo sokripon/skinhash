@@ -38,14 +38,16 @@
 #define MAXBLK 8
 #define MAXPAT 64
 #define MAXHITS 4096
-#define RIN 4                 /* inner (cached) permutation positions */
-#define NPERM 24              /* RIN! */
-#define MAXKW 8               /* words of post-permutation image */
+#ifndef RIN
+#define RIN 4                 /* inner (cached) permutation positions; must equal fastfinder GPU_R */
+#endif
+#define NPERM (RIN == 3 ? 6 : RIN == 4 ? 24 : RIN == 5 ? 120 : 720)
+#define MAXKW 6               /* words of post-permutation image */
 #ifndef BLOCK
-#define BLOCK 128
+#define BLOCK 256
 #endif
 #ifndef MINB
-#define MINB 4
+#define MINB 3
 #endif
 
 typedef unsigned long long u64;
@@ -118,7 +120,7 @@ static bool parse_pat(const char *hex, int suffix, Pat &p) {
 /* ------------------------------------------------------------------ device */
 struct DevParams {
     u32 m, nblk, W0w, nb0, acc0, crc_w0, nwL, nbL, KW, boff, Lc, b_const;
-    u32 zeros, npats, has_suffix, pad;
+    u32 zeros, npats, has_suffix, c0;
     u32 mid[8];
 };
 struct BaseDigits { u8 d[24]; };
@@ -132,6 +134,7 @@ __constant__ u32 c_wt[64];              /* Adler-b weight of position p */
 __constant__ u32 c_ac[64];              /* alpha code emitted after position p (0 if none) */
 __constant__ u32 c_al[64];              /* its length */
 __constant__ u32 c_crc[256];
+__constant__ u32 c_gt[6 * 256];          /* leaf CRC tables: 4 for the running state, 2 for the Adler-b bytes */
 __constant__ u8 c_perm[NPERM * RIN];
 __constant__ u64 c_pval[MAXPAT], c_pmask[MAXPAT];
 __constant__ u32 c_psuf[MAXPAT];
@@ -202,7 +205,7 @@ __device__ __forceinline__ void sha_block(u32 st[8], const u32 *img) {
  */
 template <bool TEST>
 __device__ __forceinline__ void run_outer(const BaseDigits &bd, u32 gid, u32 tlo, u32 thi, u64 obase,
-                                          const u32 *s_crc, const u32 *s_tab, const u32 *s_val, u32 *out) {
+                                          const u32 *s_crc, const u32 *s_gt, const u32 *s_tab, const u32 *s_val, u32 *out) {
     u32 img[MAXBLK * 16];
     const u32 m = c_p.m, nblk = c_p.nblk;
 #pragma unroll 1
@@ -251,44 +254,44 @@ __device__ __forceinline__ void run_outer(const BaseDigits &bd, u32 gid, u32 tlo
             EMIT(a2, nb2, nw2, crc2, e.x, e.y);
         }
         /* nb2 == nbL and nw2 == nwL by construction (same multiset of codes for every ordering) */
+        const u32 nwL = c_p.nwL, KW = c_p.KW;
         u32 vv[MAXKW];
 #pragma unroll
-        for (int k = 0; k < MAXKW; k++) vv[k] = c_post[k];
+        for (int k = 0; k < MAXKW; k++) vv[k] = 0;
+#pragma unroll
+        for (int k = 0; k < MAXKW; k++) { if ((u32)k >= KW) break; vv[k] = c_post[k]; }
         vv[0] |= (u32)a2;
+        const u32 b = (c_p.b_const + b2) % 65521u;
         {
-            u32 b = (c_p.b_const + b2) % 65521u;
             u32 bbe = ((b >> 8) | (b << 8)) & 0xFFFFu;
             u64 x = (u64)bbe << ((c_p.boff & 3) * 8);
             u32 kb = c_p.boff >> 2;
 #pragma unroll
-            for (int k = 0; k < MAXKW; k++)
-                vv[k] |= (k == kb ? (u32)x : 0u) | ((u32)k == kb + 1 ? (u32)(x >> 32) : 0u);
-        }
-        u32 c = crc2;
-        const u32 Lc = c_p.Lc;
-#pragma unroll
-        for (int k = 0; k < MAXKW; k++) {
-            if (4 * k >= (int)Lc) break;
-            if (4 * k + 4 <= (int)Lc) { CRCW(c, vv[k]); }
-            else {
-#pragma unroll
-                for (int j = 0; j < 4; j++)
-                    if (4 * k + j < (int)Lc) c = s_crc[(c ^ (vv[k] >> (8 * j))) & 255] ^ (c >> 8);
+            for (int k = 0; k < MAXKW; k++) {
+                if ((u32)k >= KW) break;
+                vv[k] |= ((u32)k == kb ? (u32)x : 0u) | ((u32)k == kb + 1 ? (u32)(x >> 32) : 0u);
             }
         }
+        /* CRC-32 of the post-permutation bytes is affine in (running state ^ pending bits) and in the two b bytes */
+        u32 x = crc2 ^ (u32)a2;
+        u32 c = s_gt[x & 255] ^ s_gt[256 + ((x >> 8) & 255)] ^ s_gt[512 + ((x >> 16) & 255)] ^ s_gt[768 + (x >> 24)] ^ c_p.c0 ^
+                s_gt[1024 + (b >> 8)] ^ s_gt[1280 + (b & 255)];
         c = ~c;
         {
             u32 off = c_p.boff + 4;
             u64 x = (u64)bswap(c) << ((off & 3) * 8);
             u32 kc = off >> 2;
 #pragma unroll
-            for (int k = 0; k < MAXKW; k++)
-                vv[k] |= (k == kc ? (u32)x : 0u) | ((u32)k == kc + 1 ? (u32)(x >> 32) : 0u);
+            for (int k = 0; k < MAXKW; k++) {
+                if ((u32)k >= KW) break;
+                vv[k] |= ((u32)k == kc ? (u32)x : 0u) | ((u32)k == kc + 1 ? (u32)(x >> 32) : 0u);
+            }
         }
-        const u32 nwL = c_p.nwL, KW = c_p.KW;
 #pragma unroll
-        for (int k = 0; k < MAXKW; k++)
-            if ((u32)k < KW) img[nwL + k] = bswap(vv[k]);
+        for (int k = 0; k < MAXKW; k++) {
+            if ((u32)k >= KW) break;
+            img[nwL + k] = bswap(vv[k]);
+        }
 
         u32 s[8];
 #pragma unroll
@@ -323,28 +326,29 @@ __device__ __forceinline__ void run_outer(const BaseDigits &bd, u32 gid, u32 tlo
     if (!TEST && zbest > 0 && zbest > *(volatile u32 *)&d_best_zeros) atomicMax(&d_best_zeros, zbest);
 }
 
-__device__ __forceinline__ void load_shared(u32 *s_crc, u32 *s_tab, u32 *s_val) {
+__device__ __forceinline__ void load_shared(u32 *s_crc, u32 *s_gt, u32 *s_tab, u32 *s_val) {
     for (u32 i = threadIdx.x; i < 256; i += blockDim.x) s_crc[i] = c_crc[i];
+    for (u32 i = threadIdx.x; i < 6 * 256; i += blockDim.x) s_gt[i] = c_gt[i];
     for (u32 i = threadIdx.x; i < 64; i += blockDim.x) { s_tab[i] = c_tab[i]; s_val[i] = c_val[i]; }
     __syncthreads();
 }
 
 __global__ void __launch_bounds__(BLOCK, MINB) search_kernel(BaseDigits bd, u64 obase, u32 count) {
-    __shared__ u32 s_crc[256], s_tab[64], s_val[64];
-    load_shared(s_crc, s_tab, s_val);
+    __shared__ u32 s_crc[256], s_gt[6 * 256], s_tab[64], s_val[64];
+    load_shared(s_crc, s_gt, s_tab, s_val);
     u32 gid = blockIdx.x * BLOCK + threadIdx.x;
     if (gid >= count) return;
-    run_outer<false>(bd, gid, 0, NPERM, obase, s_crc, s_tab, s_val, nullptr);
+    run_outer<false>(bd, gid, 0, NPERM, obase, s_crc, s_gt, s_tab, s_val, nullptr);
 }
 
 /* gate: thread i evaluates ordering t[i] of outer = (digits bd[i]) + gid[i] */
 __global__ void test_kernel(const BaseDigits *bds, const u32 *gids, const u32 *ts, u32 *out, int nt) {
-    __shared__ u32 s_crc[256], s_tab[64], s_val[64];
-    load_shared(s_crc, s_tab, s_val);
+    __shared__ u32 s_crc[256], s_gt[6 * 256], s_tab[64], s_val[64];
+    load_shared(s_crc, s_gt, s_tab, s_val);
     if ((int)threadIdx.x < nt) {
         u32 s[8];
         BaseDigits bd = bds[threadIdx.x];
-        run_outer<true>(bd, gids[threadIdx.x], ts[threadIdx.x], ts[threadIdx.x] + 1, 0, s_crc, s_tab, s_val, s);
+        run_outer<true>(bd, gids[threadIdx.x], ts[threadIdx.x], ts[threadIdx.x] + 1, 0, s_crc, s_gt, s_tab, s_val, s);
         for (int i = 0; i < 8; i++) out[threadIdx.x * 8 + i] = s[i];
     }
 }
@@ -492,6 +496,7 @@ static u64 splitmix(u64 &s) {
 struct DevData {
     DevParams P;
     u32 tmpl[MAXBLK * 16], post[MAXKW], tab[64], val[64], wt[64], ac[64], al[64];
+    u32 gt[6 * 256];
     u8 perm[NPERM * RIN];
 };
 
@@ -554,6 +559,20 @@ static bool derive(const Job &J, DevData &D) {
     if (Epad < 4 * P.nwL || P.KW > MAXKW || P.nwL + P.KW > J.nblk * 16) { fprintf(stderr, "gpufinder: post image does not fit (KW=%u)\n", P.KW); return false; }
     for (u32 k = 0; k < P.KW; k++)
         D.post[k] = (u32)Pb[4 * (P.nwL + k)] | (u32)Pb[4 * (P.nwL + k) + 1] << 8 | (u32)Pb[4 * (P.nwL + k) + 2] << 16 | (u32)Pb[4 * (P.nwL + k) + 3] << 24;
+    /* leaf CRC tables (CRC is linear): bytes [4*nwL, Epad+4) = pending bits | constant tail | b | a */
+    {
+        auto run = [&](u32 c, const std::vector<u8> &bytes) {
+            for (u8 by : bytes) c = crc_tab_h[(c ^ by) & 255] ^ (c >> 8);
+            return c;
+        };
+        std::vector<u8> zeros(P.Lc, 0), pm(Pb.begin() + 4 * P.nwL, Pb.begin() + 4 * P.nwL + P.Lc);
+        for (u32 i = 0; i < 4; i++) for (u32 v = 0; v < 256; v++) D.gt[i * 256 + v] = run(v << (8 * i), zeros);
+        P.c0 = run(0, pm);
+        for (u32 j = 0; j < 2; j++) for (u32 v = 0; v < 256; v++) {
+            std::vector<u8> e(P.Lc, 0); e[P.boff + j] = (u8)v;
+            D.gt[(4 + j) * 256 + v] = run(0, e);
+        }
+    }
     for (u32 w = 0; w < J.nblk * 16; w++)
         D.tmpl[w] = (u32)J.tmpl[4 * w] << 24 | (u32)J.tmpl[4 * w + 1] << 16 | (u32)J.tmpl[4 * w + 2] << 8 | J.tmpl[4 * w + 3];
     memcpy(P.mid, J.mid, 32);
@@ -619,6 +638,7 @@ int main(int argc, char **argv) {
     CK(cudaMemcpyToSymbol(c_ac, D.ac, sizeof D.ac));
     CK(cudaMemcpyToSymbol(c_al, D.al, sizeof D.al));
     CK(cudaMemcpyToSymbol(c_crc, crc_tab, sizeof crc_tab));
+    CK(cudaMemcpyToSymbol(c_gt, D.gt, sizeof D.gt));
     CK(cudaMemcpyToSymbol(c_perm, D.perm, sizeof D.perm));
     CK(cudaMemcpyToSymbol(c_pval, pv, sizeof pv));
     CK(cudaMemcpyToSymbol(c_pmask, pm, sizeof pm));
@@ -675,8 +695,8 @@ int main(int argc, char **argv) {
     u64 rng = seed;
     u64 obase = splitmix(rng) % NOUT, covered = 0;
     u64 batch = 1u << 20;   /* threads (outer values) per launch; 24 candidates each */
-    fprintf(stderr, "device=%s (sm_%d%d, %d SMs) K=%u nblk=%u m=%u perms/set=%llu patterns=%zu zeros>=%u seed=%llu\n", prop.name,
-            prop.major, prop.minor, prop.multiProcessorCount, J.K, J.nblk, m, mfact, J.pats.size(), J.zeros, seed);
+    fprintf(stderr, "device=%s (sm_%d%d, %d SMs) K=%u nblk=%u m=%u (V0=%u nvar=%u KW=%u) perms/set=%llu patterns=%zu zeros>=%u seed=%llu\n", prop.name,
+            prop.major, prop.minor, prop.multiProcessorCount, J.K, J.nblk, m, J.V0, J.nvar, D.P.KW, mfact, J.pats.size(), J.zeros, seed);
     fflush(stderr);
 
     u32 zero = 0;

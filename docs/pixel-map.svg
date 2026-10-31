@@ -4131,7 +4131,7 @@
 <path d="M51 65 L51 48" stroke="#b36b00" stroke-width="1.5"/>
 <text x="57" y="46" font-size="11" fill="#b36b00">watermark (0,0)–(5,0)</text>
 <path d="M573 632 L573 646" stroke="#c0282d" stroke-width="1.5"/>
-<text x="573" y="660" font-size="11" text-anchor="end" fill="#c0282d">fast-mode pixels (58,63)–(63,63)</text>
+<text x="573" y="660" font-size="11" text-anchor="end" fill="#c0282d">fast-mode pixels: last 5 (GPU) or 6 (CPU) of row 63</text>
 <rect x="628" y="62" width="16" height="16" rx="3" fill="#8aa2c8" stroke="#888" stroke-width="0.6"/>
 <text x="652" y="75" font-size="13" font-weight="600" fill="#1d1d1f">Base layer</text>
 <text x="652" y="92" font-size="11.5" fill="#555">drawn fully opaque by Minecraft:</text>

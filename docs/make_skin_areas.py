@@ -3,8 +3,10 @@ read and the pixels skinhash changes.
 
     py docs/make_skin_areas.py
 
-Mod areas as reported from the mods' source (Ears, Customizable Player Models,
-Mine Little Pony). Layout masks and skinhash pixels come from skinhash.py.
+Mod areas checked against the mods' source: Ears (Ears-Fifth-Edition 3d42f72),
+Customizable Player Models (129b76f, incl. its free_space_template.png) and Mine
+Little Pony (0b9e4af). Tails is as reported, not checked. Layout masks and
+skinhash pixels come from skinhash.py.
 """
 import os
 import sys
@@ -18,7 +20,7 @@ import skinhash  # noqa: E402
 S = 12                      # pixels per skin pixel
 OX, OY = 30, 70             # grid origin
 GW = 64 * S
-W, H = OX + GW + 40 + 430, OY + GW + 120
+W, H = OX + GW + 40 + 450, OY + GW + 350
 
 
 def font(size, bold=False):
@@ -38,7 +40,20 @@ C = {
     "ears": (240, 130, 30), "emissive": (250, 205, 40), "alfalfa": (40, 120, 60),
     "mlp": (220, 30, 120), "wm": (0, 170, 190), "mojang": (229, 72, 77), "namemc": (60, 60, 220),
     "unusedknob": (120, 70, 20), "text": (29, 29, 31), "muted": (90, 90, 90),
+    "tails": (150, 40, 200),
 }
+# CPM pixels whose alpha also carries a data byte (classic skins; template blue != 255)
+CPM_ALPHA_RUNS = [(0, 32, 40), (0, 56, 64), (1, 32, 40), (1, 56, 64), (2, 32, 40), (2, 56, 64), (3, 32, 40),
+    (3, 56, 64), (4, 32, 40), (4, 56, 64), (5, 32, 40), (5, 56, 64), (6, 32, 40), (6, 56, 64), (7, 32, 40),
+    (7, 56, 64), (32, 0, 4), (32, 12, 20), (32, 36, 44), (32, 52, 64), (33, 0, 4), (33, 12, 20), (33, 36, 44),
+    (33, 52, 64), (34, 0, 4), (34, 12, 20), (34, 36, 44), (34, 52, 64), (35, 0, 4), (35, 12, 20), (35, 36, 44),
+    (35, 52, 64)] + [(y, 56, 64) for y in range(36, 48)] + [(y, a, b) for y in range(48, 52)
+    for a, b in ((0, 4), (12, 16), (48, 52), (60, 64))]
+cpm_alpha = {(x, y) for y, a, b in CPM_ALPHA_RUNS for x in range(a, b)}
+assert len(cpm_alpha) == 416
+tails = {(x, y) for x in range(56, 62) for y in (16, 17, 18)}
+# vanilla: ear box rendered only for the player "deadmau5" (texture offset 24,0; size 6x6x1)
+deadmau5 = set(skinhash.box_pixels(24, 0, 6, 6, 1))
 ears_block = {(x, y) for x in range(0, 4) for y in range(32, 36)}
 emissive = {(x, y) for x in range(52, 56) for y in range(32, 36)}
 head_front = {(x, y) for x in range(8, 16) for y in range(8, 16)}
@@ -70,6 +85,8 @@ def main():
                 d.point([(x0 + 2, y0 + 2), (x1 - 2, y1 - 2)], fill=C["alfalfa"])
             if p not in base and p not in over:              # CPM free space: hatch
                 d.line([(x0, y1), (x1, y0)], fill=(200, 200, 196))
+                if p in cpm_alpha:                           # alpha byte too: cross-hatch
+                    d.line([(x0, y0), (x1, y1)], fill=(170, 170, 166))
     for x in range(0, 65, 8):
         d.line([(OX + x * S, OY), (OX + x * S, OY + GW)], fill=C["grid"], width=1)
     for y in range(0, 65, 8):
@@ -85,6 +102,13 @@ def main():
         d.rectangle((OX + min(xs) * S - 1, OY + min(ys) * S - 1,
                      OX + (max(xs) + 1) * S, OY + (max(ys) + 1) * S), outline=color, width=width)
 
+    for x, y in deadmau5:
+        x0, y0, x1, y1 = cell(x, y)
+        d.rectangle((x0 + 3, y0 + 3, x1 - 3, y1 - 3), fill=(40, 40, 40))
+    for x, y in tails:
+        x0, y0, x1, y1 = cell(x, y)
+        d.rectangle((x0 + 2, y0 + 2, x1 - 2, y1 - 2), outline=C["tails"], width=2)
+    outline(tails, C["tails"], 2)
     fill(ears_block, C["ears"]); outline(ears_block, (150, 70, 0))
     fill(emissive, C["emissive"]); outline(emissive, (160, 120, 0))
     outline(head_front, C["alfalfa"], 2)
@@ -119,6 +143,11 @@ def main():
             d.rectangle(box, fill=C["unused"], outline=(120, 120, 120))
             for k in range(0, 18, 4):
                 d.line([(box[0] + k, box[3]), (box[0] + k + 6, box[3] - 6)], fill=(150, 150, 146))
+        elif kind == "dot":
+            d.rectangle(box, fill=C["unused"], outline=(120, 120, 120))
+            d.rectangle((box[0] + 5, box[1] + 5, box[2] - 5, box[3] - 5), fill=color)
+        elif kind == "tails":
+            d.rectangle(box, fill=C["unused"], outline=color, width=2)
         elif kind == "dots":
             d.rectangle(box, fill=C["base"], outline=(120, 120, 120))
             d.point([(box[0] + 5, box[1] + 5), (box[2] - 5, box[3] - 5), (box[0] + 5, box[3] - 5)], fill=color)
@@ -132,19 +161,28 @@ def main():
     d.text((lx, ly), "Layout", font=F_B, fill=C["text"]); ly += 22
     swatch("fill", C["base"], "Base layer", ["drawn opaque (alpha forced)"])
     swatch("fill", C["overlay"], "Overlay layer", ["drawn with transparency"])
-    swatch("hatch", None, "Unused = CPM data area", ["never drawn; Customizable Player Models",
-                                                    "reads all of it (B,G,R(,A)) if header",
-                                                    "0x53 at blue of (0,0) + checksum match"])
+    swatch("hatch", None, "Unused = CPM data area", ["never drawn. CPM reads these pixels row-major",
+                                                    "as B,G,R bytes (832 px; slim: +128 arm px);",
+                                                    "active only if blue of (0,0) = 0x53 and the",
+                                                    "checksum matches. Cross-hatched: alpha is a",
+                                                    "4th byte (416 px)"])
+    d.text((lx, ly), "Vanilla", font=F_B, fill=C["text"]); ly += 22
+    swatch("dot", (40, 40, 40), "deadmau5 ears  x24–37, y0–6", ["drawn only for the player named deadmau5"])
     d.text((lx, ly), "Mods", font=F_B, fill=C["text"]); ly += 22
-    swatch("fill", C["ears"], "Ears marker block  x0–3, y32–35", ["(0,32) = #EA2501 (v1) or #3F23D8 (v0)",
-                                                                  "turns Ears on; avoid entirely"])
-    swatch("fill", C["emissive"], "Ears emissive palette  x52–55, y32–35", [])
-    swatch("dots", C["alfalfa"], "Ears Alfalfa", ["data in ALPHA of base faces (alpha",
-                                                  "128–254), except head front (outlined)"])
-    swatch("x", C["mlp"], "Mine Little Pony triggers", ["RGB of (0–3,0) (0–2,1) (2,2), alpha",
-                                                        "ignored; 000000 = no pony"])
+    swatch("fill", C["ears"], "Ears marker block  x0–3, y32–35", ["RGB of (0,32) = #EA2501 (v1) or #3F23D8 (v0)",
+                                                                  "turns Ears on; alpha is ignored here"])
+    swatch("fill", C["emissive"], "Ears emissive palette  x52–55, y32–35", ["read only if Ears is on with emissive"])
+    swatch("dots", C["alfalfa"], "Ears Alfalfa", ["7 bits per pixel in the ALPHA of base faces",
+                                                  "(any alpha 1–254 except 127), head front",
+                                                  "excluded; used only if it decodes to EA1FA1FA"])
+    swatch("x", C["mlp"], "Mine Little Pony triggers", ["race (0,0), tail (1,0), gender (2,0), size (3,0),",
+                                                        "wearables (1,1), tail shape (2,1): need alpha",
+                                                        "255; glow (0,1), priority (2,2): raw colour"])
+    swatch("tails", C["tails"], "Tails  x56–61, y16/17/18", ["tail / ears / wings rows; on if (56,y) =",
+                                                             "#FF10F0 and (57,y) = #B8E080 (as reported)"])
     d.text((lx, ly), "skinhash", font=F_B, fill=C["text"]); ly += 22
-    swatch("fill", C["wm"], "Watermark v2  (0–5,0)", ["overlaps MLP + CPM header pixel"])
+    swatch("fill", C["wm"], "Watermark v2  (0–5,0)", ["alpha 0: can't trigger MLP (needs 255) or",
+                                                      "CPM (blue 0x6b ≠ 0x53); still best moved"])
     swatch("fill", C["mojang"], "Mojang fast mode  (58|59–63,63)", ["RGB under alpha 0"])
     swatch("fill", C["namemc"], "NameMC default  (55–57,63)", ["alpha 0 → 1"])
     swatch("fill", C["unusedknob"], "--unused-only  (61–63,51)", ["Steve / typical skin"])
@@ -171,6 +209,8 @@ def main():
     ly = inset("Zoom: x 0–7, y 0–2 (watermark under MLP triggers)", 0, 0, 8, 3, 26, ly + 6)
     inset("Zoom: x 48–63, y 63 (search pixels)", 48, 63, 16, 1, 24, ly)
 
+    d.text((OX, H - 30), "Checked against source: Ears 3d42f72, CPM 129b76f, Mine Little Pony 0b9e4af. "
+           "Tails as reported (not checked). deadmau5 box from the vanilla player model.", font=F_S, fill=C["muted"])
     out = os.path.join(HERE, "skin-areas.png")
     img.save(out, optimize=True)
     print("wrote", out)

@@ -75,7 +75,7 @@ o = [f'<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/19
      'and reused for all of them.</text>']
 
 # --- skin ---------------------------------------------------------------
-SKIN = os.path.join(os.path.dirname(HERE), "skins", "scorpion3013.png")
+SKIN = os.path.join(os.path.dirname(HERE), "skins", "steve.png")
 skin = Image.open(SKIN).convert("RGBA")
 b64 = base64.b64encode(open(SKIN, "rb").read()).decode()
 ZX, ZY, ZW, ZH = 48, 60, 16, 4  # zoomed region: x 48-63, rows 60-63

@@ -17,3 +17,8 @@ found/
 
 # web test tooling
 node_modules/
+
+# your own skins and results stay local; only the example skin is tracked
+skins/*
+!skins/steve.png
+keep/

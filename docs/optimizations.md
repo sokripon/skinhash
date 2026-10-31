@@ -20,7 +20,7 @@ was checked against real zlib before its numbers were trusted. The ideas behind 
 For 10 leading zeros (≈1.1 trillion tries on average) that is ~75 days with step 1, ~7 hours with step 2 and
 ~5 minutes now.
 
-All rates come from each finder's `-b` 10-second benchmark on `skins/scorpion3013.png`.
+All rates come from each finder's `-b` 10-second benchmark on a typical 64×64 player skin.
 
 ## Step 0: what gets hashed
 

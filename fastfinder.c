@@ -465,6 +465,15 @@ static int tune_search(int kmax, uint64_t *rng) {
     return 0;
 }
 
+/* The GPU's fast kernel needs every permuted value (the first min(n,20)) to have the same Huffman code
+ * length: then each code sits at a fixed bit position. Other value sets are valid too, they just run on the
+ * generic kernel, so auto mode prefers equal lengths and falls back to the best unequal one-block set. */
+static int eq_len(void) {
+    int m = g_n < 20 ? g_n : 20, l = (int)(F.tab[g_vals[0]] >> 16);
+    for (int i = 1; i < m; i++) if ((int)(F.tab[g_vals[i]] >> 16) != l) return 0;
+    return 1;
+}
+
 static void auto_choose(uint64_t *rng) {
     int kmax = g_K, fb_k = -1, fb_n = 1 << 30;
     uint64_t fb_rng = 0;
@@ -479,14 +488,17 @@ static void auto_choose(uint64_t *rng) {
             configure_k(K);
             if (!try_setup(rng)) continue;
             ok_cnt++;
-            if (F.nblk == 1) {
-                fprintf(stderr, "auto: K=%d value set #%d gives nblk=1 (var region at block offset %zu, %zu bytes)\n", K, t + 1, F.V0, F.nvar);
+            int eq = eq_len();
+            if (F.nblk == 1 && eq) {
+                fprintf(stderr, "auto: K=%d value set #%d gives nblk=1 (var region at block offset %zu, %zu bytes), equal code lengths\n", K, t + 1, F.V0, F.nvar);
                 return;
             }
-            if (fb_k < 0 || (K == fb_k && (int)F.nblk < fb_n)) { fb_k = K; fb_n = (int)F.nblk; fb_rng = saved; }
+            int score = (int)F.nblk * 2 + !eq;   /* one block with unequal lengths still beats two blocks */
+            if (fb_k < 0 || (K == fb_k && score < fb_n)) { fb_k = K; fb_n = score; fb_rng = saved; }
         }
-        fprintf(stderr, "auto: K=%d: no single-block value set in %d tries (%d usable)\n", K, AUTO_TRIES, ok_cnt);
+        fprintf(stderr, "auto: K=%d: no one-block value set with equal code lengths in %d tries (%d usable)\n", K, AUTO_TRIES, ok_cnt);
         if (fb_k >= 0 && K <= fb_k - 2) break;   /* stay near the first usable K */
+        if (fb_k >= 0 && fb_n <= 3 && K <= TUNE_KMIN) break;   /* a one-block set (generic kernel) is in hand: do not go below K=5 (rollovers) */
     }
     if (fb_k < 0) UNSUPPORTED("no usable K / value set found in auto mode");
     configure_k(fb_k);

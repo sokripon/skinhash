@@ -16,7 +16,15 @@
  *   - CRC-32 advances a 32-bit word at a time. The Adler-b sum is linear in the values.
  *   - SHA-256 resumes from the midstate (1 block when the job says nblk == 1).
  *
- * usage: gpufinder job.bin OUTDIR [-p HEX]... [-s HEX]... [-z N] [-S SEED] [-n N] [-b]
+ * Two kernels. The generic one above works for every job. The fast one ("fixed bit positions", see the comment
+ * before FastP) is used when nblk == 1 and all permuted values have the same Huffman code length: each code
+ * then sits at a bit position independent of the permutation, so message words, CRC-32 and Adler-b are
+ * sums of per-(position, value) table entries and the first SHA rounds run once per thread. It is a template
+ * on (WI, KB), the message words of the last codes and of the Adler bytes (FAST_PAIRS lists the 24 layouts
+ * that exist). The gate runs the fast kernel; if it ever differs from the reference the generic kernel
+ * takes over. --generic or GPUFINDER_GENERIC=1 forces the generic kernel (A/B runs).
+ *
+ * usage: gpufinder job.bin OUTDIR [-p HEX]... [-s HEX]... [-z N] [-S SEED] [-n N] [-b] [--generic]
  *                  [--tried-offset N] [--time-offset S] [--bench-secs S]
  *   -p/-s/-z given here replace those stored in the job.
  * exit codes: 0 ok, 1 usage/job error, 5 correctness gate failed, 6 CUDA error / no device,
@@ -31,6 +39,7 @@
 #include <string>
 #include <vector>
 #include <algorithm>
+#include <type_traits>
 #include <cuda_runtime.h>
 
 #define MAXK 20
@@ -353,6 +362,226 @@ __global__ void test_kernel(const BaseDigits *bds, const u32 *gids, const u32 *t
     }
 }
 
+/* ======================= fast kernel: equal-length codes, fixed bit positions =======================
+ * Used when nblk == 1 and all m permuted values have the same Huffman length. Every code then sits at a
+ * fixed bit position whatever the permutation, so
+ *   - the SHA message words are (thread part) | (constant part) | OR of per-(position, value) table words,
+ *   - the CRC-32 of the variable region is the XOR of per-(position, value) deltas (CRC is linear),
+ *   - the Adler-b sum is a sum of per-(position, value) terms.
+ * WI = first message word touched by the last RIN codes, KB = word holding the two Adler-b bytes; both
+ * are template parameters so the SHA message words, the hoisted rounds and the schedule split are
+ * resolved at compile time. Message words by dependency level: 1 = depends on the thread only (words < WI),
+ * 2 = varies per candidate (WI..WI+3 and KB..KB+2), 0 = job constant. */
+struct FastP { u32 sb, c0; };
+__constant__ FastP c_fp;
+__constant__ u32 c_pw[16];       /* big-endian words of the constant image from word WI on */
+__constant__ u32 c_kw[16];       /* K256[i] + c_pw[i] */
+__constant__ u32 c_sel[32];      /* byte-permute selector of ordering t: nibble q = index of the value at inner position q */
+__constant__ uint4 c_fy[4 * 20]; /* [q][value index]: big-endian message words WI..WI+3 contributed by the code */
+__constant__ uint2 c_fcb[4 * 20];/* [q][value index]: CRC delta, Adler-b term */
+
+__host__ __device__ constexpr int lvl_f(int WI, int KB, int idx) {
+    int a[64] = {};
+    for (int i = 0; i < 64; i++) {
+        if (i < 16) a[i] = ((i >= WI && i < WI + 4) || (i >= KB && i < KB + 3)) ? 2 : (i < WI ? 1 : 0);
+        else {
+            int m = a[i - 16];
+            if (a[i - 15] > m) m = a[i - 15];
+            if (a[i - 7] > m) m = a[i - 7];
+            if (a[i - 2] > m) m = a[i - 2];
+            a[i] = m;
+        }
+    }
+    return a[idx];
+}
+template <int N, class F> __device__ __forceinline__ void static_for(F &&f) {
+    if constexpr (N > 0) { static_for<N - 1>(f); f(std::integral_constant<int, N - 1>()); }
+}
+#define SIG0(x) (ror(x, 7) ^ ror(x, 18) ^ ((x) >> 3))
+#define SIG1(x) (ror(x, 17) ^ ror(x, 19) ^ ((x) >> 10))
+struct ShaSt { u32 a, b, c, d, e, f, g, h; };
+__device__ __forceinline__ void sha_rnd(ShaSt &s, u32 kw) {
+    u32 t1 = s.h + (ror(s.e, 6) ^ ror(s.e, 11) ^ ror(s.e, 25)) + ((s.e & s.f) ^ (~s.e & s.g)) + kw;
+    u32 t2 = (ror(s.a, 2) ^ ror(s.a, 13) ^ ror(s.a, 22)) + ((s.a & s.b) ^ (s.a & s.c) ^ (s.b & s.c));
+    s.h = s.g; s.g = s.f; s.f = s.e; s.e = s.d + t1; s.d = s.c; s.c = s.b; s.b = s.a; s.a = t1 + t2;
+}
+
+template <int WI, int KB, bool TEST>
+__device__ __forceinline__ void run_outer_fast(const BaseDigits &bd, u32 gid, u32 tlo, u32 thi, u64 obase,
+                                               const u32 *s_crc, const u32 *s_gt, const u32 *s_tab, const u32 *s_val,
+                                               const uint4 *s_y, const uint2 *s_cb, u32 *out) {
+    u32 img[16];
+#pragma unroll
+    for (int i = 0; i < 16; i++) img[i] = c_tmpl[i];
+
+    u64 acc = c_p.acc0;
+    u32 nb = c_p.nb0, nw = c_p.W0w, crc = c_p.crc_w0, bacc = 0, used = 0, v = gid;
+    const u32 m = c_p.m, mo = m - RIN;
+#pragma unroll 1
+    for (u32 p = 0; p < mo; p++) {
+        u32 r = m - p, t = (u32)bd.d[p] + v, q = t / r, dg = t - q * r;
+        v = q;
+        u32 vi = __fns(~used, 0, dg + 1);
+        used |= 1u << vi;
+        u32 e = s_tab[vi], len = e >> 16;
+        u32 comb = (e & 0xFFFFu) | (c_ac[p] << len), clen = len + c_al[p];
+        bacc += c_wt[p] * s_val[vi];
+        EMIT(acc, nb, nw, crc, comb, clen);
+    }
+    /* here nw == WI and nb == (bit position of the inner codes) % 32: the host guarantees it */
+    const u32 pa = (u32)acc;
+    u32 fv = 0;
+    {
+        const u32 freem = ~used & ((1u << m) - 1u);
+#pragma unroll
+        for (int pi = 0; pi < RIN; pi++) fv |= __fns(freem, 0, pi + 1) << (8 * pi);
+    }
+    bacc += c_p.b_const;
+    /* thread CRC part: the running state plus the pending word, pushed through the rest of the region */
+    const u32 xc = crc ^ pa;
+    const u32 V = s_gt[xc & 255] ^ s_gt[256 + ((xc >> 8) & 255)] ^ s_gt[512 + ((xc >> 16) & 255)] ^ s_gt[768 + (xc >> 24)] ^ c_fp.c0;
+
+    /* thread-level message words, hoisted SHA rounds 0..WI-1 and the thread part of the schedule */
+    u32 tw[16], ws[64], pwv[64];
+    ShaSt hs;
+    hs.a = c_p.mid[0]; hs.b = c_p.mid[1]; hs.c = c_p.mid[2]; hs.d = c_p.mid[3];
+    hs.e = c_p.mid[4]; hs.f = c_p.mid[5]; hs.g = c_p.mid[6]; hs.h = c_p.mid[7];
+    static_for<16>([&](auto ic) {
+        constexpr int i = decltype(ic)::value;
+        if constexpr (i < WI) { tw[i] = img[i]; ws[i] = tw[i]; sha_rnd(hs, c_K256[i] + tw[i]); }
+        else if constexpr (i == WI) { tw[i] = c_pw[i] | bswap(pa); ws[i] = 0; }
+        else { tw[i] = 0; ws[i] = c_pw[i]; }
+    });
+    static_for<48>([&](auto ic) {
+        constexpr int i = decltype(ic)::value + 16;
+        [[maybe_unused]] constexpr int l16 = lvl_f(WI, KB, i - 16), l15 = lvl_f(WI, KB, i - 15), l7 = lvl_f(WI, KB, i - 7), l2 = lvl_f(WI, KB, i - 2);
+        if constexpr (lvl_f(WI, KB, i) <= 1) {
+            ws[i] = ws[i - 16] + SIG0(ws[i - 15]) + ws[i - 7] + SIG1(ws[i - 2]);
+        } else {
+            u32 s = 0;
+            if constexpr (l16 <= 1) s += ws[i - 16];
+            if constexpr (l15 <= 1) s += SIG0(ws[i - 15]);
+            if constexpr (l7 <= 1) s += ws[i - 7];
+            if constexpr (l2 <= 1) s += SIG1(ws[i - 2]);
+            pwv[i] = s;
+        }
+    });
+
+    u32 zbest = 0;
+#pragma unroll 1
+    for (u32 t = tlo; t < thi; t++) {
+        const u32 fp = __byte_perm(fv, 0, c_sel[t]);
+        const uint4 y0 = s_y[0 * 20 + (fp & 255)], y1 = s_y[1 * 20 + ((fp >> 8) & 255)];
+        const uint4 y2 = s_y[2 * 20 + ((fp >> 16) & 255)], y3 = s_y[3 * 20 + (fp >> 24)];
+        const uint2 k0 = s_cb[0 * 20 + (fp & 255)], k1 = s_cb[1 * 20 + ((fp >> 8) & 255)];
+        const uint2 k2 = s_cb[2 * 20 + ((fp >> 16) & 255)], k3 = s_cb[3 * 20 + (fp >> 24)];
+        const u32 Y[4] = {y0.x | y1.x | y2.x | y3.x, y0.y | y1.y | y2.y | y3.y, y0.z | y1.z | y2.z | y3.z, y0.w | y1.w | y2.w | y3.w};
+        const u32 b = (bacc + k0.y + k1.y + k2.y + k3.y) % 65521u;
+        const u32 cc = ~(V ^ k0.x ^ k1.x ^ k2.x ^ k3.x ^ s_gt[1024 + (b >> 8)] ^ s_gt[1280 + (b & 255)]);
+        const u32 sb = c_fp.sb, Zhi = b << 16;
+        const u32 Z[3] = {Zhi >> sb, __funnelshift_r(cc, Zhi, sb), sb ? cc << (32 - sb) : 0u};
+
+        u32 w[64];
+        static_for<64>([&](auto ic) {
+            constexpr int i = decltype(ic)::value;
+            if constexpr (lvl_f(WI, KB, i) == 2) {
+                if constexpr (i < 16) {
+                    u32 x = (i == WI) ? tw[WI] : c_pw[i];
+                    if constexpr (i >= WI && i < WI + 4) x |= Y[i - WI];
+                    if constexpr (i >= KB && i < KB + 3) x |= Z[i - KB];
+                    w[i] = x;
+                } else {
+                    u32 s = pwv[i];
+                    if constexpr (lvl_f(WI, KB, i - 16) == 2) s += w[i - 16];
+                    if constexpr (lvl_f(WI, KB, i - 15) == 2) s += SIG0(w[i - 15]);
+                    if constexpr (lvl_f(WI, KB, i - 7) == 2) s += w[i - 7];
+                    if constexpr (lvl_f(WI, KB, i - 2) == 2) s += SIG1(w[i - 2]);
+                    w[i] = s;
+                }
+            }
+        });
+        ShaSt st = hs;
+        static_for<64 - WI>([&](auto ic) {
+            constexpr int i = decltype(ic)::value + WI;
+            if constexpr (lvl_f(WI, KB, i) == 2) sha_rnd(st, c_K256[i] + w[i]);
+            else if constexpr (i < 16) sha_rnd(st, c_kw[i]);
+            else sha_rnd(st, c_K256[i] + ws[i]);
+        });
+        u32 s[8] = {c_p.mid[0] + st.a, c_p.mid[1] + st.b, c_p.mid[2] + st.c, c_p.mid[3] + st.d,
+                    c_p.mid[4] + st.e, c_p.mid[5] + st.f, c_p.mid[6] + st.g, c_p.mid[7] + st.h};
+        if (TEST) {
+            for (int i = 0; i < 8; i++) out[i] = s[i];
+            return;
+        }
+        u64 hi = (u64)s[0] << 32 | s[1];
+        u32 zn = hi ? (u32)(__clzll(hi) >> 2) : 16u;
+        zbest = max(zbest, zn);
+        bool hit = c_p.zeros && zn >= c_p.zeros;
+        if (c_p.npats) {
+            u64 mi = (u64)s[2] << 32 | s[3];
+            u64 lo = (u64)s[6] << 32 | s[7];
+            u64 tp;
+            if (hi) { int sh = __clzll(hi) & ~3; tp = sh ? (hi << sh) | (mi >> (64 - sh)) : hi; }
+            else tp = mi ? mi << (__clzll(mi) & ~3) : 0;
+            for (u32 i = 0; i < c_p.npats; i++) {
+                u64 vv2 = c_psuf[i] ? lo : tp;
+                if ((vv2 & c_pmask[i]) == c_pval[i]) { hit = true; break; }
+            }
+        }
+        if (hit) {
+            u32 pos = atomicAdd(&d_nhits, 1u);
+            if (pos < MAXHITS) d_hits[pos] = (obase + gid) * NPERM + t;
+        }
+    }
+    if (!TEST && zbest > 0 && zbest > *(volatile u32 *)&d_best_zeros) atomicMax(&d_best_zeros, zbest);
+}
+
+__device__ __forceinline__ void load_shared_fast(u32 *s_crc, u32 *s_gt, u32 *s_tab, u32 *s_val, uint4 *s_y, uint2 *s_cb) {
+    for (u32 i = threadIdx.x; i < 4 * 20; i += blockDim.x) { s_y[i] = c_fy[i]; s_cb[i] = c_fcb[i]; }
+    load_shared(s_crc, s_gt, s_tab, s_val);   /* ends with __syncthreads() */
+}
+
+template <int WI, int KB>
+__global__ void __launch_bounds__(BLOCK, MINB) search_fast(BaseDigits bd, u64 obase, u32 count) {
+    __shared__ u32 s_crc[256], s_gt[6 * 256], s_tab[64], s_val[64];
+    __shared__ uint4 s_y[4 * 20];
+    __shared__ uint2 s_cb[4 * 20];
+    load_shared_fast(s_crc, s_gt, s_tab, s_val, s_y, s_cb);
+    u32 gid = blockIdx.x * BLOCK + threadIdx.x;
+    if (gid >= count) return;
+    run_outer_fast<WI, KB, false>(bd, gid, 0, NPERM, obase, s_crc, s_gt, s_tab, s_val, s_y, s_cb, nullptr);
+}
+
+template <int WI, int KB>
+__global__ void test_fast(const BaseDigits *bds, const u32 *gids, const u32 *ts, u32 *out, int nt) {
+    __shared__ u32 s_crc[256], s_gt[6 * 256], s_tab[64], s_val[64];
+    __shared__ uint4 s_y[4 * 20];
+    __shared__ uint2 s_cb[4 * 20];
+    load_shared_fast(s_crc, s_gt, s_tab, s_val, s_y, s_cb);
+    if ((int)threadIdx.x < nt) {
+        u32 s[8];
+        BaseDigits bd = bds[threadIdx.x];
+        run_outer_fast<WI, KB, true>(bd, gids[threadIdx.x], ts[threadIdx.x], ts[threadIdx.x] + 1, 0, s_crc, s_gt, s_tab, s_val, s_y, s_cb, s);
+        for (int i = 0; i < 8; i++) out[threadIdx.x * 8 + i] = s[i];
+    }
+}
+
+typedef void (*SearchFn)(BaseDigits, u64, u32);
+typedef void (*TestFn)(const BaseDigits *, const u32 *, const u32 *, u32 *, int);
+struct FastFns { SearchFn search; TestFn test; };
+#if defined(DEV_WI) && !defined(FAST_PAIRS)
+#define FAST_PAIRS(X) X(DEV_WI, DEV_KB)
+#endif
+#ifndef FAST_PAIRS
+#define FAST_PAIRS(X) X(2,3) X(2,4) X(2,5) X(3,4) X(3,5) X(3,6) X(4,5) X(4,6) X(4,7) X(5,6) X(5,7) X(5,8)     X(6,7) X(6,8) X(6,9) X(7,8) X(7,9) X(7,10) X(8,9) X(8,10) X(8,11) X(9,10) X(9,11) X(10,11)
+#endif
+static bool pick_fast(int WI, int KB, FastFns &f) {
+#define X(a, b) if (WI == a && KB == b) { f.search = search_fast<a, b>; f.test = test_fast<a, b>; return true; }
+    FAST_PAIRS(X)
+#undef X
+    return false;
+}
+
 /* host CPU reference, independent of the kernel */
 static const u32 K256h[64] = {
     0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,
@@ -587,13 +816,100 @@ static bool derive(const Job &J, DevData &D) {
     return t == NPERM;
 }
 
+/* fast-kernel constants; ok == false means "use the generic kernel" */
+struct FastData {
+    bool ok = false;
+    const char *why = "";
+    int WI = 0, KB = 0;
+    FastP P;
+    u32 pw[16], kw[16], sel[32];
+    uint4 fy[4 * 20];
+    uint2 fcb[4 * 20];
+    u32 gt[6 * 256];
+};
+
+static bool derive_fast(const Job &J, const DevData &D, FastData &F) {
+    memset(&F.P, 0, sizeof F.P);
+    const u32 m = J.m, mo = m - RIN, n = J.n;
+    if (J.nblk != 1) { F.why = "2+ SHA blocks"; return false; }
+    if (J.R != RIN || RIN != 4 || m > 20 || m != n) { F.why = "unsupported permutation shape"; return false; }   /* m < n would need a longer constant part: not worth it */
+    const u32 L = D.tab[0] >> 16;
+    for (u32 j = 0; j < m; j++) if ((D.tab[j] >> 16) != L) { F.why = "unequal code lengths"; return false; }
+    if (L < 1 || L > 15) return false;
+    u64 pos = 8ull * J.V0 + J.rem;
+    for (u32 p = 0; p < mo; p++) pos += L + D.al[p];
+    const u64 pos_in = pos;
+    u32 off[RIN], rel = 0;
+    for (u32 q = 0; q < RIN; q++) { off[q] = rel; rel += L + D.al[mo + q]; }
+    F.WI = (int)(pos_in / 32);
+    const u32 sh = (u32)(pos_in % 32);
+    if (sh + off[RIN - 1] + L > 128) return false;
+    std::vector<u8> Pb(J.nblk * 64 + 16, 0);
+    auto putbits = [&](std::vector<u8> &B, u64 at, u32 code, u32 len) {
+        for (u32 i = 0; i < len; i++) if ((code >> i) & 1) B[(at + i) / 8] |= (u8)(1u << ((at + i) % 8));
+    };
+    /* alpha codes inside the inner region (constant), then everything after the permuted values */
+    for (u32 q = 0; q < RIN; q++) if (D.al[mo + q]) putbits(Pb, pos_in + off[q] + L, D.ac[mo + q], D.al[mo + q]);
+    pos = pos_in + rel;
+    for (u32 p = m; p < n; p++) {   /* not reached (m == n) but kept for symmetry */
+        putbits(Pb, pos, D.tab[p] & 0xFFFF, D.tab[p] >> 16); pos += D.tab[p] >> 16;
+        if (p % 3 == 2) { u32 e = J.tab[J.alpha[p / 3]]; putbits(Pb, pos, e & 0xFFFF, e >> 16); pos += e >> 16; }
+    }
+    putbits(Pb, pos, J.eob & 0xFFFF, J.eob >> 16); pos += J.eob >> 16;
+    const u32 Epad = (u32)((pos + 7) / 8);
+    if (Epad + 8 != J.V0 + J.nvar || Epad + 8 > 64) { F.why = "layout mismatch"; return false; }
+    /* Adler-a: same value as derive() */
+    {
+        u64 asum = J.adl_a;
+        for (u32 j = 0; j < J.K; j++) asum += J.alpha[j];
+        for (u32 j = 0; j < n; j++) asum += J.vals[j];
+        u32 a_fin = (u32)(asum % 65521);
+        Pb[Epad + 2] = (u8)(a_fin >> 8); Pb[Epad + 3] = (u8)a_fin;
+    }
+    for (u32 i = Epad + 8; i < J.nblk * 64; i++) Pb[i] = J.tmpl[i];
+    F.KB = (int)(Epad >> 2);
+    if (F.WI < 1 || F.WI > 12 || F.KB + 3 > 16 || (u32)F.WI * 4 >= Epad + 4) return false;
+    F.P.sb = 8 * (Epad & 3);
+    const u32 Lc = Epad + 4 - 4 * (u32)F.WI;       /* bytes from word WI to the end of the Adler-32 */
+    const u32 boff = Epad - 4 * (u32)F.WI;
+    auto run = [&](u32 c, const std::vector<u8> &bytes) {
+        for (u8 by : bytes) c = crc_tab_h[(c ^ by) & 255] ^ (c >> 8);
+        return c;
+    };
+    auto be = [&](const std::vector<u8> &B, u32 w) {
+        return (u32)B[4 * w] << 24 | (u32)B[4 * w + 1] << 16 | (u32)B[4 * w + 2] << 8 | B[4 * w + 3];
+    };
+    for (u32 i = 0; i < 16; i++) {
+        F.pw[i] = (int)i >= F.WI ? be(Pb, i) : 0;
+        F.kw[i] = K256h[i] + F.pw[i];
+    }
+    F.P.c0 = run(0, std::vector<u8>(Pb.begin() + 4 * F.WI, Pb.begin() + 4 * F.WI + Lc));
+    memset(F.fy, 0, sizeof F.fy); memset(F.fcb, 0, sizeof F.fcb);
+    for (u32 q = 0; q < RIN; q++) for (u32 vi = 0; vi < m; vi++) {
+        std::vector<u8> B(J.nblk * 64 + 16, 0);
+        putbits(B, pos_in + off[q], D.tab[vi] & 0xFFFF, L);
+        F.fy[q * 20 + vi] = make_uint4(be(B, F.WI), be(B, F.WI + 1), be(B, F.WI + 2), be(B, F.WI + 3));
+        F.fcb[q * 20 + vi] = make_uint2(run(0, std::vector<u8>(B.begin() + 4 * F.WI, B.begin() + 4 * F.WI + Lc)), D.wt[mo + q] * D.val[vi]);
+    }
+    std::vector<u8> zeros(Lc, 0);
+    for (u32 i = 0; i < 4; i++) for (u32 v = 0; v < 256; v++) F.gt[i * 256 + v] = run(v << (8 * i), zeros);
+    for (u32 j = 0; j < 2; j++) for (u32 v = 0; v < 256; v++) {
+        std::vector<u8> e(Lc, 0); e[boff + j] = (u8)v;
+        F.gt[(4 + j) * 256 + v] = run(0, e);
+    }
+    memset(F.sel, 0, sizeof F.sel);
+    for (int t = 0; t < NPERM; t++) for (int q = 0; q < RIN; q++) F.sel[t] |= (u32)D.perm[t * RIN + q] << (4 * q);
+    F.ok = true;
+    return true;
+}
+
 int main(int argc, char **argv) {
     if (argc < 3) { fprintf(stderr, "usage: gpufinder job.bin OUTDIR [-p HEX]... [-s HEX]... [-z N] [-S SEED] [-n N] [-b]\n"); return 1; }
     Job J;
     if (!load_job(argv[1], J)) { fprintf(stderr, "gpufinder: cannot read job file %s\n", argv[1]); return 1; }
     std::string outdir = argv[2];
     long long max_hits = -1;
-    int bench = 0;
+    int bench = 0, force_generic = getenv("GPUFINDER_GENERIC") != nullptr;
     double bench_secs = 10, time_off = 0;
     u64 tried_off = 0;
     u64 seed = (u64)std::chrono::system_clock::now().time_since_epoch().count() * 0x9E3779B97F4A7C15ULL;
@@ -613,6 +929,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "--time-offset") && v) { time_off = atof(v); i++; }
         else if (!strcmp(a, "--bench-secs") && v) { bench_secs = atof(v); i++; }
         else if (!strcmp(a, "-b")) bench = 1;
+        else if (!strcmp(a, "--generic")) force_generic = 1;
         else { fprintf(stderr, "unknown option %s\n", a); return 1; }
     }
     if (!cli.empty()) J.pats = cli;
@@ -637,6 +954,22 @@ int main(int argc, char **argv) {
     CK(cudaMemcpyToSymbol(c_ac, D.ac, sizeof D.ac));
     CK(cudaMemcpyToSymbol(c_al, D.al, sizeof D.al));
     CK(cudaMemcpyToSymbol(c_crc, crc_tab, sizeof crc_tab));
+    static FastData FD;
+    static u32 gt_generic[6 * 256];
+    memcpy(gt_generic, D.gt, sizeof gt_generic);
+    FastFns fns = {nullptr, nullptr};
+    if (!force_generic && derive_fast(J, D, FD)) {
+        if (pick_fast(FD.WI, FD.KB, fns)) {
+            memcpy(gt_generic, D.gt, sizeof gt_generic);
+            memcpy(D.gt, FD.gt, sizeof D.gt);   /* leaf CRC tables for the fast layout */
+            CK(cudaMemcpyToSymbol(c_fp, &FD.P, sizeof FD.P));
+            CK(cudaMemcpyToSymbol(c_pw, FD.pw, sizeof FD.pw));
+            CK(cudaMemcpyToSymbol(c_kw, FD.kw, sizeof FD.kw));
+            CK(cudaMemcpyToSymbol(c_sel, FD.sel, sizeof FD.sel));
+            CK(cudaMemcpyToSymbol(c_fy, FD.fy, sizeof FD.fy));
+            CK(cudaMemcpyToSymbol(c_fcb, FD.fcb, sizeof FD.fcb));
+        } else fprintf(stderr, "gpufinder: fast layout WI=%d KB=%d not compiled in, using the generic kernel\n", FD.WI, FD.KB);
+    }
     CK(cudaMemcpyToSymbol(c_gt, D.gt, sizeof D.gt));
     CK(cudaMemcpyToSymbol(c_perm, D.perm, sizeof D.perm));
     CK(cudaMemcpyToSymbol(c_pval, pv, sizeof pv));
@@ -652,8 +985,21 @@ int main(int argc, char **argv) {
 
     /* correctness gate: GPU must reproduce the CPU test vectors exactly */
     {
+        int ncpu = (int)J.tests.size();
+        if (ncpu < 1) { fprintf(stderr, "gpufinder: GATE FAILED: job has no test vectors\n"); return 5; }
+        /* more vectors than the job carries: random indices (and both ends of the range) checked against the
+           independent byte-oriented host builder, which has just been cross-checked against the CPU vectors */
+        {
+            u64 r2 = seed ^ 0xD1B54A32D192ED03ULL;
+            for (int i = 0; i < 112 && J.tests.size() < 128; i++) {
+                TestVec tv;
+                tv.idx = i == 0 ? 1 : i == 1 ? mfact - 2 : splitmix(r2) % mfact;
+                std::vector<u8> file = host_file(J, tv.idx);
+                sha256_h(file.data(), file.size(), tv.sha);
+                J.tests.push_back(tv);
+            }
+        }
         int nt = (int)J.tests.size();
-        if (nt < 1) { fprintf(stderr, "gpufinder: GATE FAILED: job has no test vectors\n"); return 5; }
         if (nt > 128) nt = 128;
         std::vector<BaseDigits> bds(nt);
         std::vector<u32> gids(nt), ts(nt);
@@ -666,34 +1012,47 @@ int main(int argc, char **argv) {
             gids[i] = (u32)g; ts[i] = (u32)(idx % RF);
             digits_of(o - g, bds[i]);
         }
-        BaseDigits *d_bd; u32 *d_g, *d_t, *d_out;
-        CK(cudaMalloc(&d_bd, nt * sizeof(BaseDigits))); CK(cudaMalloc(&d_g, nt * 4)); CK(cudaMalloc(&d_t, nt * 4));
-        CK(cudaMalloc(&d_out, nt * 32));
-        CK(cudaMemcpy(d_bd, bds.data(), nt * sizeof(BaseDigits), cudaMemcpyHostToDevice));
-        CK(cudaMemcpy(d_g, gids.data(), nt * 4, cudaMemcpyHostToDevice));
-        CK(cudaMemcpy(d_t, ts.data(), nt * 4, cudaMemcpyHostToDevice));
-        test_kernel<<<1, 128>>>(d_bd, d_g, d_t, d_out, nt);
-        CK(cudaGetLastError()); CK(cudaDeviceSynchronize());
-        std::vector<u32> out(nt * 8);
-        CK(cudaMemcpy(out.data(), d_out, nt * 32, cudaMemcpyDeviceToHost));
-        cudaFree(d_bd); cudaFree(d_g); cudaFree(d_t); cudaFree(d_out);
-        int bad = 0;
-        for (int i = 0; i < nt; i++) {
-            u8 d[32];
-            for (int k = 0; k < 8; k++) { d[4*k] = out[i*8+k] >> 24; d[4*k+1] = out[i*8+k] >> 16; d[4*k+2] = out[i*8+k] >> 8; d[4*k+3] = out[i*8+k]; }
-            if (memcmp(d, J.tests[i].sha, 32)) bad++;
-            /* cross-check the host reference builder against the CPU expectation too */
-            std::vector<u8> file = host_file(J, J.tests[i].idx);
-            u8 hd[32]; sha256_h(file.data(), file.size(), hd);
-            if (memcmp(hd, J.tests[i].sha, 32)) { fprintf(stderr, "gpufinder: GATE FAILED: host reference disagrees with job test vector %d\n", i); return 5; }
+        auto run_gate = [&](bool use_fast) -> int {
+            BaseDigits *d_bd; u32 *d_g, *d_t, *d_out;
+            CK(cudaMalloc(&d_bd, nt * sizeof(BaseDigits))); CK(cudaMalloc(&d_g, nt * 4)); CK(cudaMalloc(&d_t, nt * 4));
+            CK(cudaMalloc(&d_out, nt * 32));
+            CK(cudaMemcpy(d_bd, bds.data(), nt * sizeof(BaseDigits), cudaMemcpyHostToDevice));
+            CK(cudaMemcpy(d_g, gids.data(), nt * 4, cudaMemcpyHostToDevice));
+            CK(cudaMemcpy(d_t, ts.data(), nt * 4, cudaMemcpyHostToDevice));
+            if (use_fast) fns.test<<<1, 128>>>(d_bd, d_g, d_t, d_out, nt);
+            else test_kernel<<<1, 128>>>(d_bd, d_g, d_t, d_out, nt);
+            CK(cudaGetLastError()); CK(cudaDeviceSynchronize());
+            std::vector<u32> out(nt * 8);
+            CK(cudaMemcpy(out.data(), d_out, nt * 32, cudaMemcpyDeviceToHost));
+            cudaFree(d_bd); cudaFree(d_g); cudaFree(d_t); cudaFree(d_out);
+            int bad = 0;
+            for (int i = 0; i < nt; i++) {
+                u8 d[32];
+                for (int k = 0; k < 8; k++) { d[4*k] = out[i*8+k] >> 24; d[4*k+1] = out[i*8+k] >> 16; d[4*k+2] = out[i*8+k] >> 8; d[4*k+3] = out[i*8+k]; }
+                if (memcmp(d, J.tests[i].sha, 32)) bad++;
+                /* cross-check the host reference builder against the CPU expectation too */
+                std::vector<u8> file = host_file(J, J.tests[i].idx);
+                u8 hd[32]; sha256_h(file.data(), file.size(), hd);
+                if (memcmp(hd, J.tests[i].sha, 32)) { fprintf(stderr, "gpufinder: GATE FAILED: host reference disagrees with job test vector %d\n", i); exit(5); }
+            }
+            return bad;
+        };
+        int bad = run_gate(fns.test != nullptr);
+        if (bad && fns.test) {
+            fprintf(stderr, "gate: the fast kernel differs from the reference on %d of %d vectors; using the generic kernel\n", bad, nt);
+            fns.search = nullptr; fns.test = nullptr; FD.why = "fast kernel failed the gate";
+            CK(cudaMemcpyToSymbol(c_gt, gt_generic, sizeof gt_generic));
+            bad = run_gate(false);
         }
         if (bad) { fprintf(stderr, "gpufinder: GATE FAILED: %d of %d test vectors differ between GPU and CPU\n", bad, nt); return 5; }
-        fprintf(stderr, "gate: GPU reproduced %d/%d CPU test vectors exactly\n", nt, nt);
+        fprintf(stderr, "gate: GPU reproduced %d/%d CPU test vectors and %d/%d host-reference vectors exactly\n", ncpu, ncpu, nt - ncpu, nt - ncpu);
     }
 
     u64 rng = seed;
     u64 obase = splitmix(rng) % NOUT, covered = 0;
     u64 batch = 1u << 20;   /* threads (outer values) per launch; 24 candidates each */
+    if (fns.search) fprintf(stderr, "kernel: fast (fixed bit positions, WI=%d KB=%d)\n", FD.WI, FD.KB);
+    else fprintf(stderr, "kernel: generic (%s)\n", force_generic ? "forced" : FD.why[0] ? FD.why : "layout not compiled in");
     fprintf(stderr, "device=%s (sm_%d%d, %d SMs) K=%u nblk=%u m=%u (V0=%u nvar=%u KW=%u) perms/set=%llu patterns=%zu zeros>=%u seed=%llu\n", prop.name,
             prop.major, prop.minor, prop.multiProcessorCount, J.K, J.nblk, m, J.V0, J.nvar, D.P.KW, mfact, J.pats.size(), J.zeros, seed);
     fflush(stderr);
@@ -708,7 +1067,8 @@ int main(int argc, char **argv) {
         double ts = now_s();
         u64 cnt = std::min<u64>(batch, std::min(NOUT - covered, NOUT - obase));
         BaseDigits bd; digits_of(obase, bd);
-        search_kernel<<<(unsigned)((cnt + BLOCK - 1) / BLOCK), BLOCK>>>(bd, obase, (u32)cnt);
+        if (fns.search) fns.search<<<(unsigned)((cnt + BLOCK - 1) / BLOCK), BLOCK>>>(bd, obase, (u32)cnt);
+        else search_kernel<<<(unsigned)((cnt + BLOCK - 1) / BLOCK), BLOCK>>>(bd, obase, (u32)cnt);
         CK(cudaGetLastError());
         CK(cudaDeviceSynchronize());
         tried += cnt * RF;

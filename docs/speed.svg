@@ -29,9 +29,9 @@
 
     <text x="24" y="208" font-weight="600" fill="#1d1d1f">Fast mode (GPU)</text>
     <text x="24" y="224" font-size="11" fill="#777">CUDA, RTX 5060 Ti</text>
-    <rect x="210" y="196" width="481" height="24" rx="4" fill="#e5484d"/>
-    <text x="699" y="213" fill="#1d1d1f">3.85 G/s</text>
-    <text x="916" y="213" text-anchor="end" fill="#1d1d1f">~5 minutes</text>
+    <rect x="210" y="196" width="491" height="24" rx="4" fill="#e5484d"/>
+    <text x="709" y="213" fill="#1d1d1f">4.8 G/s</text>
+    <text x="916" y="213" text-anchor="end" fill="#1d1d1f">~4 minutes</text>
   </g>
   <text x="24" y="286" font-size="11.5" fill="#777">Each extra leading zero takes 16× longer.</text>
 </svg>

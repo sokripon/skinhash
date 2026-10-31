@@ -95,8 +95,9 @@ search values, the Adler/CRC state and 16 test vectors. The GPU hashes candidate
 | 5 pixels instead of 6. The changing bytes plus SHA padding now fit into one 64-byte block, which halves the SHA work. | 1.93 G/s |
 | New enumeration. Each GPU thread decodes the first positions of its permutation once with 32-bit maths (no 64-bit divisions), then tries all 24 orderings of the last 4 positions. The bits after the shuffled region are constant, so only a few bytes are patched in. CRC-32 runs word by word, the Adler sum is updated linearly, and the global best-so-far counter is touched once per thread instead of once per candidate. | 3.58 G/s |
 | Block-size and occupancy tuning | ~3.85 G/s |
+| Fixed bit positions: all search values have the same code length, so every code sits at a known bit, the tail is OR/XOR of table entries and the first SHA rounds are done once per thread | ~4.8 G/s |
 
-A kernel that only does SHA-256 reaches about 4.46 G/s, so there's little headroom left. The full history,
+The SHA-256 rounds are now almost all that is left of the per-candidate work (about 1430 instructions, of which the tail is ~40), so there's little headroom left. The full history,
 including what didn't help, is in the [optimization log](optimizations.md).
 
 **Pixel count.** `fastfinder --dump-job --auto` tries pixel counts from 6 downwards, with up to 400 random
@@ -139,15 +140,15 @@ A rollover costs under a second.
 |---|---|---|
 | Generic (CPU) | `--engine generic` | ~150–170k/s |
 | Fast mode (CPU) | `--engine cpu` | ~45–50M/s |
-| Fast mode (GPU) | `--engine gpu` | ~3.85G/s |
+| Fast mode (GPU) | `--engine gpu` | ~4.8G/s |
 
 Each extra leading zero takes 16× longer on average:
 
-| Target | GPU at 3.85G/s |
+| Target | GPU at 4.8G/s |
 |---|---|
 | 8-char hex word | ~1 s |
 | 9 zeros | ~18 s |
-| 10 zeros | ~5 min |
+| 10 zeros | ~4 min |
 | 11 zeros | ~75 min |
 | 12 zeros | ~20 h |
 
@@ -195,7 +196,7 @@ hashes 1024 counters that differ only in the last pixel, which shares the work b
 watermark), which NameMC ignores. So: `namemc` first, then `mojang` on the result (the `both` command does exactly this). The alpha-1 pixels are
 fixed for `mojang`, and `verify` still passes (also against the original skin). Side effect: the bytes next to the tail often prevent the
 one-block layout of GPU fast mode. Length tuning (section 4) restores it, so the Mojang phase of `both` runs at
-~3.9 G/s instead of 2.1 G/s.
+~4.8 G/s instead of 2.1 G/s.
 
 | Mode | Rate |
 |---|---|

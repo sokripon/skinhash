@@ -1,6 +1,6 @@
 # Optimization log
 
-The search went from ~26 thousand to ~3.85 billion candidates per second, about 150,000× faster, on one PC
+The search went from ~26 thousand to ~4.8 billion candidates per second, about 185,000× faster, on one PC
 (Ryzen 5 5600X, RTX 5060 Ti). Every step keeps the output byte-identical to what Mojang produces, and each
 was checked against real zlib before its numbers were trusted. The ideas behind the steps are in
 [how-it-works.md](how-it-works.md).
@@ -18,9 +18,10 @@ was checked against real zlib before its numbers were trusted. The ideas behind 
 | 4c | GPU: block size / occupancy tuning | ~3.85 G/s | ×1.07 |
 | 5 | Mojang search on skins that had no one-block layout (Dinnerbone, Grumm, every NameMC hit): length tuning | 2.1 → ~3.7–4.1 G/s on those skins | ×1.8 on them |
 | 6 | NameMC GPU kernel: constant rounds and schedule hoisted out of the 1024-candidate loop | 2.8 → ~3.1 G/s | ×1.12 |
+| 7 | Mojang GPU kernel: fixed bit positions (equal code lengths), table-driven tail, first SHA rounds and schedule terms once per thread | ~3.9 → ~4.8 G/s | ×1.23 |
 
 For 10 leading zeros (≈1.1 trillion tries on average) that is ~75 days with step 1, ~7 hours with step 2 and
-~5 minutes now.
+~4 minutes now.
 
 All rates come from each finder's `-b` 10-second benchmark on a typical 64×64 player skin.
 
@@ -146,11 +147,10 @@ A rollover costs under a second.
 
 ### Ceiling and what's left
 
-- A kernel variant that does only the SHA-256 block reaches about 4.46 G/s, so the full search is within about
-  15% of the hashing ceiling.
-- Together about 5–10% is left: precomputing the SHA rounds that depend only on the fixed first bytes of the
-  block (needs one kernel per byte offset), and compiling the kernel at run time for each job (NVRTC) so job
-  constants become literals.
+- (At the time of step 4) A kernel variant that does only the SHA-256 block reached about 4.46 G/s, so the full
+  search was within about 15% of the hashing ceiling. Step 7 goes past that figure by removing SHA work as well.
+- (Done in step 7: the rounds that depend only on the fixed first bytes of the block run once per thread, with
+  one kernel per layout, and the tail is table-driven.)
 - Nsight Compute counters are blocked on this machine (`ERR_NVGPUCTRPERM`), so all tuning was by experiment.
 
 ## Step 5: length tuning for 2-block skins, 2.1 → ~3.7–4.1 G/s on them
@@ -216,6 +216,100 @@ The WGSL kernel (`web/js/nmgpu.js`, `fastParts`) generates the same split, with 
 JavaScript (WGSL rejects overflowing constant expressions) and the same text used by the search loop and the
 gate. Chrome A/B on the same page: 2.24 → 2.41 G/s (+7%).
 
+## Step 7: Mojang kernel, fixed bit positions, 3.9 → ~4.8 G/s
+
+A SASS review of the step 4-6 kernel showed 1948 instructions per candidate, of which about 300 were the tail
+(permutation codes → bit image, CRC-32, Adler-b): a branchy `EMIT` chain with a local-memory image (800 bytes of
+stack per thread) and a per-thread code table that was indexed dynamically.
+
+**Observation.** The permuted values occur once each in the image, so zlib usually gives them all the same Huffman
+code length (10-11 bits on the skins we looked at). With equal lengths every code sits at a bit position that does
+not depend on the permutation; only which value sits there does. Everything per candidate is then linear:
+
+| Quantity | Per candidate |
+|---|---|
+| SHA message words WI..WI+3 (the last four codes) | OR of four 16-byte shared-memory table entries `[position][value]` (entries are pre-shifted to their bit position) |
+| CRC-32 of the variable region | XOR of four CRC deltas (CRC is linear over GF(2)) and two lookups for the Adler-b bytes. The thread's own part (running state plus pending bits pushed through the rest of the region) is computed once per thread |
+| Adler-b | sum of four `weight × value` table terms, one `% 65521` |
+| Adler-b and CRC bytes in the message | a few shifts, three words ORed in at the fixed word `KB` |
+| Permutation of the 4 inner values | one `PRMT` with a per-ordering selector, then four byte extracts |
+
+The tail went from ~300 to ~40 instructions and the local arrays are gone (96 bytes of stack, no spills).
+
+**Constant message words.** Message words below `WI` depend on the thread only (5-6 words for V0 around 9), words
+above the Adler/CRC bytes are job constants, and only `WI..WI+3` and `KB..KB+2` vary per candidate. The kernel is a
+template on `(WI, KB)` and classifies all 64 schedule words at compile time (constant / thread / candidate):
+
+- rounds 0..WI-1 run once per thread;
+- thread-only schedule words are computed once per thread;
+- for the other words the sum of the terms that do not depend on the candidate is computed once per thread
+  (`pwv`, up to 16 values), so a candidate only adds its own terms;
+- rounds that use constant words take `K + w` from a precomputed constant (`c_kw`).
+
+**Delivery: template instantiations, generic kernel as fallback, not NVRTC.** All one-block layouts
+(`V0 + nvar + 21 <= 64`) give only 24 distinct `(WI, KB)` pairs, so 24 × 2 kernels (search, gate) are compiled in:
+the build takes about one extra minute and the exe grows by about 1 MB. NVRTC would specialise even more (job
+constants as literals), but needs `nvrtc64_*.dll` and `nvrtc-builtins64_*.dll` next to the exe (they ship with the
+toolkit, not the driver), the driver API to load the module, and a second copy of the kernel as source text. The
+templates need none of that and degrade gracefully: the generic kernel is used for 2-block jobs, for value sets
+with unequal code lengths, for a layout that is not in the table, and with `--generic` / `GPUFINDER_GENERIC=1`
+(for A/B runs).
+
+**Job builder.** `fastfinder --auto` now prefers a one-block value set with equal code lengths. If it finds none it
+takes the best one-block set with unequal lengths (generic kernel) and never goes below K=5 for this purpose
+(a smaller K would roll over many times per second). The job format and the index → permutation mapping did not
+change.
+
+How often equal lengths occur (100 random value sets per case, K=6 / K=5):
+
+| Skin | Equal-length sets |
+|---|---|
+| steve | 100 / 85 |
+| Dinnerbone (tuned) | 87 / 100 |
+| obus test skin | 100 / 70 |
+| scorpion3013 | 67 / 100 |
+| Grumm, untuned image | 0 / 0 (it is a 2-block image anyway; its tuned images are fine) |
+
+Whether the singletons share one depth is a property of the image's Huffman shape. With `--auto` (400 value sets per
+K, length tuning included) a one-block equal-length set was found in all ~380 job builds we ran (5 skins × 25-40
+tuning seeds, 150 perturbed Steve variants at K=4-6). A rollover builds its next value set the same way.
+
+**Measured** (10 s `skinhash.py bench --engine gpu`, Mojang phase, 3 alternating runs each; "before" is the same
+binary with `GPUFINDER_GENERIC=1`, i.e. the old kernel on the same kind of job):
+
+| Case | Before (G/s) | After (G/s) |
+|---|---|---|
+| steve.png | 3.91, 4.03, 3.90 | 4.88, 4.94, 4.87 |
+| NameMC hit made from steve.png (length tuned) | 4.11, 4.03, 3.85 | 4.87, 4.83, 4.89 |
+| Dinnerbone (local skin, length tuned) | 3.92, 3.89, 3.93 | 4.70, 4.76, 4.71 |
+| `gpufinder -b` on one job, old exe vs new exe | 3.84, 3.43, 4.00 | 4.72, 4.65, 4.84 |
+
+The spread (3.4-4.0 for the old kernel on the same job) is GPU clock and temperature, so compare the alternating
+pairs. The NameMC rate (~3.1 G/s) is unchanged.
+
+| SASS of the search kernel | Generic (before) | Fast (after) |
+|---|---|---|
+| Instructions in the candidate loop | 1948 | 1430 (SHF 611, LOP3 347, IADD3 338, ~40 other) |
+| Registers | 55 | 61 |
+| Stack frame / spills | 800 B / 0 | 96 B / 0 |
+| Shared memory per block | 7.7 KB | 9.6 KB |
+
+At ~1430 instructions per candidate, 36 SMs × 64 integer lanes × ~3.0 GHz allow about 4.8-5.0 G/s, so the kernel
+is now at the cost of the plain SHA-256 rounds. What is left is micro-work: treating the unused fourth table word and
+third Adler/CRC word as constants (≈10 instructions) and folding round WI into the thread-level state (≈10).
+
+Block size and occupancy (`MINB` 2/3/4: 4.65-4.79 G/s) are within noise, so 3 stays.
+
+The WGSL kernel (`web/js`) is unchanged: this step is native only.
+
+### Gate for the fast kernel
+
+The gate of every job and rollover now covers the fast kernel itself and uses more vectors: the 16 CPU vectors
+plus 112 more (random indices and both ends of the range) checked against the independent byte-oriented host builder
+in gpufinder, which is itself compared with the CPU vectors. If the fast kernel disagrees on any vector, gpufinder
+says so, switches to the generic kernel, repeats the gate, and exits with code 5 only if that fails too. Hits are
+re-hashed on the CPU as before.
+
 ## Rejected ideas
 
 | Idea | Why not |
@@ -237,6 +331,7 @@ No speed-up counted until it reproduced real zlib's bytes.
 | 3–4 | GPU must match 16 CPU test vectors exactly, at start-up and after every rollover; every hit re-hashed on the CPU |
 | 5 | The tuned image goes through the same 1000-permutation self-test and test vectors; `verify` rejects any change at a RESERVED pixel |
 | 6 | The NameMC kernel must still reproduce 96 CPU test vectors; the WGSL gate runs the hoisted code itself |
+| 7 | The fast kernel passes the gate (16 CPU vectors + 112 host-reference vectors) for every job; on a mismatch gpufinder falls back to the generic kernel and gates that |
 | All | `skinhash.py` re-verifies every hit: the hash matches the filename, Python's zlib reproduces the identical bytes, and no visible pixel changed |
 
 Real uploads confirmed the whole pipeline: Mojang assigned exactly the predicted ids.

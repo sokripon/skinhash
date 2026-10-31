@@ -172,4 +172,4 @@ No speed-up counted until it reproduced real zlib's bytes.
 | 3–4 | GPU must match 16 CPU test vectors exactly, at start-up and after every rollover; every hit re-hashed on the CPU |
 | All | `skinhash.py` re-verifies every hit: the hash matches the filename, Python's zlib reproduces the identical bytes, and no visible pixel changed |
 
-Real uploads confirmed the whole pipeline: Mojang assigned exactly the predicted ids, including the 11-zero one.
+Real uploads confirmed the whole pipeline: Mojang assigned exactly the predicted ids.

@@ -33,5 +33,5 @@
     <text x="699" y="213" fill="#1d1d1f">3.85 G/s</text>
     <text x="916" y="213" text-anchor="end" fill="#1d1d1f">~5 minutes</text>
   </g>
-  <text x="24" y="286" font-size="11.5" fill="#777">Each extra leading zero takes 16× longer. The 11-zero id was found at ~1.2 G/s, ahead of its ~4 h average (now ~75 min).</text>
+  <text x="24" y="286" font-size="11.5" fill="#777">Each extra leading zero takes 16× longer.</text>
 </svg>

@@ -50,7 +50,7 @@ for byte, and no visible pixel differs from the original skin.
 
 | Claim | Status | Evidence |
 |---|---|---|
-| Mojang's servers keep the hidden RGB unchanged | Proven | A test upload and the 11-zero upload both got exactly the predicted id. That's only possible if every hidden byte survived. |
+| Mojang's servers keep the hidden RGB unchanged | Proven | Test uploads got exactly the predicted ids. That's only possible if every hidden byte survived. |
 | The tool only touches transparent overlay or unused pixels | Checked by code | Selection rules above; `verify` checks every hit. |
 | The Java client draws nothing for alpha-0 overlay pixels | Very likely | The skin loader's alpha-forcing only covers base-layer regions, not the sleeve overlay. The overlay is drawn with alpha cutout, and skin textures aren't filtered. Partly transparent overlays with leftover colour are common in real skins. |
 | Every other renderer (Bedrock via Geyser, third-party viewers, mods) does the same | Not tested | `--unused-only` avoids the question: those pixels are never drawn at all. |
@@ -137,9 +137,7 @@ Each extra leading zero takes 16× longer on average:
 | 11 zeros | ~75 min |
 | 12 zeros | ~20 h |
 
-Result so far: an 11-zero id, `00000000000ce817…`, live as
-`textures.minecraft.net/texture/ce81796dbeb618dd6f893689e6f05a98faea679edba3bfda50315` (53 characters).
-In a ~64M-skin archive the previous shortest real skin link had 8 zeros.
+In a ~64M-skin archive the shortest real skin link has 8 leading zeros, so 9 or more is a new record.
 
 `pixel-map.svg` is generated from the same layout tables the tool uses: `py docs/make_pixel_map.py`.
 

@@ -2,7 +2,7 @@
 
 Brute-force a "cool looking" Minecraft skin texture id by varying pixels that are invisible in game.
 
-**[How it works, with illustrations](docs/how-it-works.md)**
+**[How it works, with illustrations](docs/how-it-works.md)** · **[Optimization log](docs/optimizations.md)**
 
 The texture id is the SHA-256 of the PNG Mojang serves, with leading zero digits dropped in the URL
 (a zero-padded URL 404s). Mojang re-encodes uploads as signature + IHDR + exactly one IDAT

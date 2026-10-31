@@ -82,7 +82,7 @@ The CPU prepares a small "job" once. It contains the fixed file prefix, the SHA-
 | **Smarter enumeration.** Each GPU thread decodes the first positions of its permutation once with 32-bit maths (no 64-bit divisions), then tries all 24 orderings of the last 4 positions. The bits after the shuffled region are constant, so only a few bytes are patched in. CRC-32 runs word by word, the Adler sum is updated linearly, and the global "best so far" counter is touched once per thread instead of once per candidate. | 3.58 G/s |
 | Block-size and occupancy tuning | **~3.85 G/s** |
 
-A kernel that does nothing but SHA-256 reaches about 4.46 G/s, so there's little headroom left.
+A kernel that does nothing but SHA-256 reaches about 4.46 G/s, so there's little headroom left. The full history, including what didn't help, is in the [optimization log](optimizations.md).
 
 **Choosing the pixel count:** `fastfinder --dump-job --auto` tries pixel counts from 6 downwards, with up to 400 random value sets each. It picks the largest count whose changing bytes fit one SHA block: 5 on the test skin, where 6 never fits. If nothing fits, it falls back to the best 2-block configuration, at about 2.1 G/s.
 

@@ -46,10 +46,10 @@ no visible pixel changed) and prints `HIT <why> sha=<full hex> id=<trimmed id> c
 
 ## Finders
 
-`hashfinder.c` (generic, ~150k/s) writes a counter into knob bytes, deflates the changed tail from a cloned
+`hashfinder.c` (generic, ~150–170k/s) writes a counter into knob bytes, deflates the changed tail from a cloned
 zlib state and hashes the whole PNG.
 
-`fastfinder.c` (~50M/s) takes the last K pixels (row 63) and gives their 3K RGB bytes 3K distinct values
+`fastfinder.c` (~45–50M/s) takes the last K pixels (row 63) and gives their 3K RGB bytes 3K distinct values
 that occur nowhere else in the image. Every candidate is a permutation of those values (Heap's algorithm,
 reshuffled randomly after 12! steps). Then:
 
@@ -88,7 +88,7 @@ runs its usual self-test against real zlib, then writes a job file and exits. Th
 file prefix, SHA-256 midstate, tail layout, Huffman code per byte value, value set, Adler/CRC prefix state,
 patterns and 16 CPU-computed test vectors.
 
-The rate is about 3.9e9 candidates/s on an RTX 5060 Ti, up from 1.24e9. Four things get it there:
+The rate is about 3.85e9 candidates/s on an RTX 5060 Ti, up from about 1.2e9. Four things get it there:
 
 - **One SHA-256 block per candidate.** `--auto` looks for the largest K <= `--k` and a random value set
   where the variable region, the 9 padding bytes and the 12 constant IEND bytes fit in the last 64-byte
@@ -127,14 +127,14 @@ Safety:
   reported or written.
 - `--gpu` falls back to CPU fastfinder, with a message, if gpufinder.exe is missing or fails.
 
-Measured on an RTX 5060 Ti: about 3.9e9 candidates/s (K=5, 1 SHA block), against about 60e6/s for fastfinder
-on 12 CPU threads, roughly 65x. Expected times for `-z N` at 3.9e9/s:
+Measured on an RTX 5060 Ti: about 3.85e9 candidates/s (K=5, 1 SHA block), against ~45–50M/s for fastfinder
+on 12 CPU threads, roughly 80x. Expected times for `-z N` at 3.85e9/s:
 
 | leading zeros | tries   | expected time |
 |---------------|---------|---------------|
 | 8             | 4.3e9   | ~1.1 s        |
 | 9             | 6.9e10  | ~18 s         |
-| 10            | 1.1e12  | ~4.7 min      |
+| 10            | 1.1e12  | ~4.8 min      |
 | 11            | 1.8e13  | ~75 min       |
 | 12            | 2.8e14  | ~20 h         |
 

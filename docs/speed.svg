@@ -24,8 +24,8 @@
     <text x="24" y="156" font-weight="600" fill="#1d1d1f">Fast mode (CPU)</text>
     <text x="24" y="172" font-size="11" fill="#777">12 threads, SHA-NI</text>
     <rect x="210" y="144" width="276" height="24" rx="4" fill="#c9b6e8"/>
-    <text x="494" y="161" fill="#1d1d1f">43 M/s</text>
-    <text x="916" y="161" text-anchor="end" fill="#1d1d1f">~7 hours</text>
+    <text x="494" y="161" fill="#1d1d1f">43–51 M/s</text>
+    <text x="916" y="161" text-anchor="end" fill="#1d1d1f">~6–7 hours</text>
 
     <text x="24" y="208" font-weight="600" fill="#1d1d1f">Fast mode (GPU)</text>
     <text x="24" y="224" font-size="11" fill="#777">CUDA, RTX 5060 Ti</text>
@@ -33,5 +33,5 @@
     <text x="699" y="213" fill="#1d1d1f">3.85 G/s</text>
     <text x="916" y="213" text-anchor="end" fill="#1d1d1f">~5 minutes</text>
   </g>
-  <text x="24" y="286" font-size="11.5" fill="#777">Each extra leading zero takes 16× longer. The 11-zero id was found at 1.25 G/s, ahead of its ~4 h average (now ~75 min).</text>
+  <text x="24" y="286" font-size="11.5" fill="#777">Each extra leading zero takes 16× longer. The 11-zero id was found at ~1.2 G/s, ahead of its ~4 h average (now ~75 min).</text>
 </svg>

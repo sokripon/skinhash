@@ -60,9 +60,11 @@ the end of the left sleeve. Nothing should be visible there.
 
 ## 3. Fast mode
 
+![Animation: one candidate at a time](fast-mode-animated.svg)
+
 ![Why fast mode only hashes the last block](fast-mode.svg)
 
-Re-compressing the whole skin for every candidate is slow, about 170k tries/s. Fast mode skips compression:
+Re-compressing the whole skin for every candidate is slow, about 150–170k tries/s. Fast mode skips compression:
 
 1. It fills the search pixels with byte values that occur nowhere else in the image. zlib can't match them
    against earlier data, so they always come out as literals.
@@ -121,8 +123,8 @@ A rollover costs under a second.
 
 | Mode | Command | Rate |
 |---|---|---|
-| Generic (CPU) | `--generic` | ~170k/s |
-| Fast mode (CPU) | default | ~43M/s |
+| Generic (CPU) | `--generic` | ~150–170k/s |
+| Fast mode (CPU) | default | ~45–50M/s |
 | Fast mode (GPU) | `--gpu` | ~3.85G/s |
 
 Each extra leading zero takes 16× longer on average:

@@ -38,10 +38,15 @@
 
   <section id="targetsec" hidden>
     <h2>2. What are you looking for?</h2>
+    <div class="row modes">
+      <label class="inline"><input type="radio" name="mode" value="mojang" checked> Mojang texture link</label>
+      <label class="inline"><input type="radio" name="mode" value="namemc"> NameMC skin page</label>
+    </div>
+    <label class="inline" id="unusedwrap" hidden><input id="unusedonly" type="checkbox"> Unused pixels only (never drawn at all, but much slower)</label>
     <div class="grid">
-      <label>Prefixes (hex, no leading 0)<input id="prefixes" type="text" placeholder="c0ffee, beef" autocomplete="off" spellcheck="false"></label>
+      <label><span id="prefixlabel">Prefixes (hex, no leading 0)</span><input id="prefixes" type="text" placeholder="c0ffee, beef" autocomplete="off" spellcheck="false"></label>
       <label>Suffixes (hex)<input id="suffixes" type="text" placeholder="dead" autocomplete="off" spellcheck="false"></label>
-      <label>Minimum leading zeros<input id="zeros" type="number" min="0" max="15" value="0"></label>
+      <label><span id="zeroslabel">Minimum leading zeros</span><input id="zeros" type="number" min="0" max="15" value="0"></label>
     </div>
     <div class="row">
       <label class="inline"><input type="radio" name="stop" value="n" checked> Stop after <input id="stopn" type="number" min="1" value="1" class="small"> hit(s)</label>

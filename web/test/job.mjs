@@ -8,7 +8,7 @@ import { findWatermark } from "../js/model.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 let fail = 0;
-for (const name of ["scorpion3013.png", "obus_test.png"]) {
+for (const name of ["steve.png"]) {
   const rgba = decodePng(new Uint8Array(fs.readFileSync(path.join(here, "..", "..", "skins", name)))).rgba;
   const prep = prepareSkin(rgba);
   console.log(`${name}: eligible=${prep.eligible} invisible tail=${prep.kvis} watermark=${JSON.stringify(prep.wm[0])}..${JSON.stringify(prep.wm.at(-1))} found=${JSON.stringify(findWatermark(prep.rgba))}`);
@@ -30,7 +30,7 @@ for (const name of ["scorpion3013.png", "obus_test.png"]) {
 
 // rollover: a fresh value set with the same K / block count passes the self-test too
 {
-  const rgba = decodePng(new Uint8Array(fs.readFileSync(path.join(here, "..", "..", "skins", "scorpion3013.png")))).rgba;
+  const rgba = decodePng(new Uint8Array(fs.readFileSync(path.join(here, "..", "..", "skins", "steve.png")))).rgba;
   const prep = prepareSkin(rgba);
   const rng = makeRng(99);
   const a = (await autoChoose(prep, rng)).job;

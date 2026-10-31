@@ -1,7 +1,7 @@
 // End-to-end browser test: drives system Chrome (puppeteer-core) against a local static server.
 // puppeteer-core is NOT part of the repo. Install it in a scratch dir and point WEBTEST_DIR at it:
 //   set WEBTEST_DIR=C:\path\to\scratch   (contains node_modules/puppeteer-core)
-//   node web/test/browser_test.mjs [--headful] [--skin skins/scorpion3013.png] [--out DIR]
+//   node web/test/browser_test.mjs [--headful] [--skin skins/steve.png] [--out DIR]
 import fs from "node:fs";
 import path from "node:path";
 import { createRequire } from "node:module";
@@ -13,7 +13,7 @@ const repo = path.resolve(here, "..", "..");
 const args = process.argv.slice(2);
 const opt = (n, d) => { const i = args.indexOf(n); return i >= 0 ? args[i + 1] : d; };
 const headful = args.includes("--headful");
-const skin = path.resolve(repo, opt("--skin", "skins/scorpion3013.png"));
+const skin = path.resolve(repo, opt("--skin", "skins/steve.png"));
 const outDir = path.resolve(opt("--out", path.join(process.env.WEBTEST_DIR || ".", "downloads")));
 const CHROME = process.env.CHROME || "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe";
 const puppeteer = createRequire(path.join(process.env.WEBTEST_DIR || process.cwd(), "x.js"))("puppeteer-core");
@@ -109,6 +109,73 @@ try {
     const t = spawnSync("py", ["skinhash.py", "detect", d.f], { cwd: repo, encoding: "utf8" });
     check(/YES/.test(t.stdout) && /v2/.test(t.stdout), `skinhash.py detect: ${t.stdout.trim().slice(0, 100)}`);
   }
+
+  // ---------- NameMC mode ----------
+  const setMode = async (m) => { await page.click(`input[name=mode][value=${m}]`); await new Promise((r) => setTimeout(r, 300)); };
+  const nmCheck = (hit, prefix, extra = []) => {
+    const v = spawnSync("py", [path.join(here, "namemc_check.py"), skin, hit, prefix, ...extra], { cwd: repo, encoding: "utf8" });
+    check(v.status === 0 && /^OK/.test(v.stdout), `namemc_check ${path.basename(hit).slice(0, 18)}: ${(v.stdout + v.stderr).trim().slice(0, 100)}`);
+  };
+  await setMode("namemc");
+  const nmInfo = await page.evaluate(() => ({ mode: __skinhash.mode, knobs: __skinhash.nprep.knobs, nb: __skinhash.nprep.nb, fast: __skinhash.nprep.fast, nm: __skinhash.origNm }));
+  check(nmInfo.mode === "namemc" && nmInfo.fast && nmInfo.knobs.length === 3, `NameMC mode: knobs ${JSON.stringify(nmInfo.knobs)}, ${nmInfo.nb} SHA blocks, current NameMC id ${nmInfo.nm}`);
+  await reset();
+  await page.click("#bench");
+  await page.waitForFunction(() => __skinhash.running, { timeout: 5000 });
+  await waitIdle(60000);
+  const nb = await page.evaluate(() => ({ gate: __skinhash.gate, bench: __skinhash.bench, err: __skinhash.error }));
+  check(nb.gate?.ok, `NameMC gate: GPU reproduced ${nb.gate?.n}/${nb.gate?.n} CPU test vectors`);
+  check(!!nb.bench, `NameMC benchmark rate = ${nb.bench ? (nb.bench.rate / 1e9).toFixed(3) + " G/s" : "n/a"} over ${nb.bench?.secs?.toFixed(1)} s; native CUDA reference 2.81 G/s`);
+  if (nb.err) console.log("  error:", nb.err);
+
+  const n1 = await runSearch("NameMC -p beef", { prefixes: "beef", suffixes: "", zeros: "0" }, 3);
+  check(n1.hits.length === 3 && n1.hits.every((h) => h.id.startsWith("beef") && h.url.startsWith("https://namemc.com/skin/")), "NameMC prefix beef: 3 hits");
+  await grab(n1);
+  for (const h of n1.hits) nmCheck(path.join(outDir, h.id + ".png"), "beef");
+  const nz = await runSearch("NameMC prefix 0000 (leading zero allowed)", { prefixes: "0000", suffixes: "", zeros: "0" }, 1);
+  check(nz.hits.length === 1 && nz.hits[0].id.startsWith("0000"), "NameMC prefix 0000: 1 hit");
+  await grab(nz);
+  for (const h of nz.hits) nmCheck(path.join(outDir, h.id + ".png"), "0000");
+
+  // unused pixels only: the general kernel (about 50 SHA blocks per candidate)
+  await page.click("#unusedonly");
+  await new Promise((r) => setTimeout(r, 300));
+  const gi = await page.evaluate(() => ({ fast: __skinhash.nprep.fast, nb: __skinhash.nprep.nb, knobs: __skinhash.nprep.knobs }));
+  check(!gi.fast && gi.nb > 2, `unused-only layout: ${gi.nb} blocks, knobs ${JSON.stringify(gi.knobs)}`);
+  const nu = await runSearch("NameMC unused-only -p b", { prefixes: "bee", suffixes: "", zeros: "0" }, 1);
+  check(nu.hits.length === 1 && nu.hits[0].id.startsWith("bee"), "NameMC unused-only: 1 hit (general kernel passed the gate)");
+  await grab(nu);
+  for (const h of nu.hits) nmCheck(path.join(outDir, h.id + ".png"), "bee", ["--unused-only"]);
+  await page.click("#unusedonly");
+  await new Promise((r) => setTimeout(r, 300));
+
+  // combined flow: NameMC hit -> "Use as skin" -> Mojang search keeps the NameMC id
+  const c1 = await runSearch("combined: NameMC beef", { prefixes: "beef", suffixes: "", zeros: "0" }, 1);
+  check(c1.hits.length === 1, "combined: NameMC hit found");
+  await grab(c1);
+  const nmFile = path.join(outDir, c1.hits[0].id + ".png");
+  await page.click("#hits button.use");
+  await page.waitForFunction(() => __skinhash.mode === "mojang" && __skinhash.prep?.eligible, { timeout: 10000 });
+  const cm = await page.evaluate(() => ({ mode: __skinhash.mode, k: __skinhash.prep.kvis, hits: __skinhash.hits.length }));
+  check(cm.mode === "mojang" && cm.k >= 5, `Use as skin: switched to Mojang mode, fast mode still eligible (invisible tail ${cm.k})`);
+  await reset();
+  for (const [id, v] of Object.entries({ prefixes: "cafe", suffixes: "", zeros: "0" })) await page.$eval("#" + id, (el, val) => { el.value = val; el.dispatchEvent(new Event("input")); }, v);
+  await page.$eval("#stopn", (el) => { el.value = "1"; });
+  await page.click("#start");
+  await page.waitForFunction(() => __skinhash.running, { timeout: 5000 });
+  await page.waitForFunction(() => !__skinhash.running, { timeout: 90000, polling: 200 });
+  const mj = await page.evaluate(() => ({ err: __skinhash.error, hits: __skinhash.hits.filter((h) => h.mode !== "namemc").map((h) => ({ id: h.id })) }));
+  check(!mj.err && mj.hits.length === 1 && mj.hits[0].id.startsWith("cafe"), `combined: Mojang search cafe from the NameMC hit: ${mj.hits.length} hit(s) ${mj.err || ""}`);
+  const mjLinks = await page.$$("#hits a.dl");
+  for (const l of mjLinks) await l.click();
+  await new Promise((r) => setTimeout(r, 1500));
+  const mjFile = path.join(outDir, mj.hits[0].id + ".png");
+  check(fs.existsSync(mjFile), "combined: Mojang hit downloaded");
+  const vv = spawnSync("py", ["skinhash.py", "verify", nmFile, mjFile], { cwd: repo, encoding: "utf8" });
+  check(vv.status === 0 && /^OK/.test(vv.stdout), `combined: skinhash.py verify <namemc hit> <mojang hit>: ${vv.stdout.trim().slice(0, 90)}`);
+  const ids = spawnSync("py", ["skinhash.py", "namemc-id", nmFile, mjFile], { cwd: repo, encoding: "utf8" });
+  const idl = ids.stdout.trim().split(/\r?\n/).map((l) => l.split(/\s+/)[0]);
+  check(idl.length === 2 && idl[0] === idl[1] && idl[0] === path.basename(nmFile, ".png"), `combined: NameMC id unchanged by the Mojang search (${idl.join(" = ")})`);
 } catch (e) {
   console.log("TEST ERROR:", e.message); failures++;
 } finally {

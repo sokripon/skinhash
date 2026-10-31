@@ -2,13 +2,13 @@
 // a prefix matches the id with leading zeros dropped (as in the URL), so a prefix may not start with 0.
 export const MAX_HEX = 16;
 
-export function parseHexList(text, kind) {
+export function parseHexList(text, kind, allowLeadingZero = false) {
   const out = [], errors = [];
   for (const raw of text.split(/[\s,;]+/).filter(Boolean)) {
     const s = raw.toLowerCase();
     if (!/^[0-9a-f]+$/.test(s)) errors.push(`"${raw}" is not hexadecimal (0-9, a-f).`);
     else if (s.length > MAX_HEX) errors.push(`"${raw}" is longer than ${MAX_HEX} digits.`);
-    else if (kind === "prefix" && s[0] === "0") errors.push(`Prefix "${raw}" starts with 0. The link drops leading zeros, so a prefix can't start with 0; use "minimum leading zeros" instead.`);
+    else if (kind === "prefix" && s[0] === "0" && !allowLeadingZero) errors.push(`Prefix "${raw}" starts with 0. The link drops leading zeros, so a prefix can't start with 0; use "minimum leading zeros" instead.`);
     else if (!out.includes(s)) out.push(s);
   }
   return { list: out, errors };
@@ -43,9 +43,10 @@ export function gpuTargets(targets) {
 }
 
 /** Which of the given targets does this digest (64 hex chars) satisfy? */
-export function matchTargets(hex, targets) {
-  const id = hex.replace(/^0+/, "") || "0";
-  const zeros = hex.length - id.length;
+export function matchTargets(hex, targets, fixed = false) {
+  // fixed (NameMC): hex is the 16-digit id, matched as is. Mojang: prefixes match the id without leading zeros.
+  const id = fixed ? hex : (hex.replace(/^0+/, "") || "0");
+  const zeros = hex.length - (hex.replace(/^0+/, "") || "0").length;
   return targets.filter((t) =>
     t.kind === "prefix" ? id.startsWith(t.text) :
     t.kind === "suffix" ? hex.endsWith(t.text) :
@@ -53,7 +54,15 @@ export function matchTargets(hex, targets) {
 }
 
 /** Rough expected number of candidates for one hit. */
-export function expectedTries(t) {
+export function expectedTries(t, fixed = false) {
   if (t.kind === "zeros") return Math.pow(16, Number(t.text));
-  return Math.pow(16, t.text.length) * (t.kind === "prefix" ? 16 / 15 : 1);
+  return Math.pow(16, t.text.length) * (t.kind === "prefix" && !fixed ? 16 / 15 : 1);
+}
+
+/** NameMC kernel targets: patterns on the 64-bit id plus a zeros threshold on the id words. */
+export function gpuNmTargets(targets) {
+  const z = targets.find((t) => t.kind === "zeros");
+  let zmode = 0, zthr = 0;
+  if (z) { const n = Number(z.text); if (n <= 8) { zmode = 1; zthr = Math.pow(2, 32 - 4 * n); } else { zmode = 2; zthr = Math.pow(2, 64 - 4 * n); } }
+  return { pats: targets.filter((t) => t.kind !== "zeros").map(gpuPattern), zmode, zthr };
 }

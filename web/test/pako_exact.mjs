@@ -10,7 +10,7 @@ import { decodePng, rawScanlines, RAW_LEN, W, H, DEFLATE_OPTS } from "../js/png.
 import { prepareSkin, makeRng, pickVals, knobLayout } from "../js/job.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-const skins = ["scorpion3013.png", "obus_test.png"].map((n) => path.join(here, "..", "..", "skins", n));
+const skins = ["steve.png"].map((n) => path.join(here, "..", "..", "skins", n));
 const rng = makeRng(12345);
 const cases = []; // {name, raw}
 
@@ -21,24 +21,35 @@ for (const s of skins) {
   const prep = prepareSkin(rgba);
   cases.push({ name: name + " +watermark", raw: Uint8Array.from(prep.raw) });
   // random hidden RGB under every alpha-0 pixel
-  for (let i = 0; i < 70; i++) {
+  for (let i = 0; i < 150; i++) {
     const v = Uint8Array.from(rgba);
     for (let p = 0; p < W * H; p++) if (v[p * 4 + 3] === 0) { v[p * 4] = rng.below(256); v[p * 4 + 1] = rng.below(256); v[p * 4 + 2] = rng.below(256); }
     cases.push({ name: `${name} hidden-RGB #${i}`, raw: rawScanlines(v) });
   }
   // random hidden RGB under a random subset, plus watermark
-  for (let i = 0; i < 30; i++) {
+  for (let i = 0; i < 60; i++) {
     const v = Uint8Array.from(prep.rgba);
     for (let p = 0; p < W * H; p++) if (v[p * 4 + 3] === 0 && rng.below(3) === 0) { v[p * 4] = rng.below(256); v[p * 4 + 1] = rng.below(256); v[p * 4 + 2] = rng.below(256); }
     cases.push({ name: `${name} partial-hidden #${i}`, raw: rawScanlines(v) });
   }
   // search-like: random knob permutations of unused values in the last K pixels
-  if (prep.eligible) for (const K of [5, 6]) for (let i = 0; i < 40; i++) {
+  if (prep.eligible) for (const K of [5, 6]) for (let i = 0; i < 60; i++) {
     const raw = Uint8Array.from(prep.raw);
     const vals = Array.from(pickVals(prep, K, rng));
     knobLayout(K).knob.forEach((o, j) => { raw[o] = vals[j]; });
     cases.push({ name: `${name} knobs K=${K} #${i}`, raw });
   }
+}
+
+// synthetic skins: random noise with random alpha, few-colour palettes, and a skin with an opaque last pixel
+for (let i = 0; i < 60; i++) {
+  const v = new Uint8Array(W * H * 4);
+  const pal = Array.from({ length: 1 + rng.below(i % 3 === 0 ? 200 : 8) }, () => [rng.below(256), rng.below(256), rng.below(256)]);
+  for (let p = 0; p < W * H; p++) {
+    const c = pal[rng.below(pal.length)];
+    v[p * 4] = c[0]; v[p * 4 + 1] = c[1]; v[p * 4 + 2] = c[2]; v[p * 4 + 3] = rng.below(3) === 0 ? 0 : (i % 2 ? 255 : rng.below(256));
+  }
+  cases.push({ name: `synthetic #${i}`, raw: rawScanlines(v) });
 }
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pako_exact_"));

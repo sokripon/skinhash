@@ -15,6 +15,12 @@
       Every search adds an invisible watermark (6 transparent unused pixels whose RGB spells
       "sokripon skinhash" + 02, normally at (0,0)-(5,0)). --no-watermark turns it off.
   py skinhash.py verify BASE.png FOUND.png     -> FOUND looks identical in game and hashes to its name
+  py skinhash.py namemc SKIN.png [--gpu] [--unused-only] [-p HEX] [-s HEX] [-z N] [-n N] [--out DIR] [--all]
+      NameMC mode: finds a skin whose NameMC id (namemc.com/skin/<16 hex>) matches. The knob is three
+      overlay/unused pixels that are fully transparent in SKIN.png; they get alpha 1 and a counter as RGB.
+      Fixed-width 16 hex id, prefixes may start with 0. Uses namemcfinder.exe, or namemcgpu.exe with --gpu.
+      The result can then go through `search` for a Mojang id; the NameMC id stays the same.
+  py skinhash.py namemc-id FILE...             -> NameMC id (and Mojang texture id) of skin files
   py skinhash.py detect FILE|ID|URL...         -> was this skin made by skinhash? (IDs and URLs are downloaded)
 """
 import hashlib
@@ -232,7 +238,7 @@ ROLLOVER_RC = 7      # gpufinder: this value set is exhausted
 LAST_ROLLOVER = None  # (cumulative tried, cumulative seconds) from the last ROLLOVER line
 
 
-def run_finder(cmd, rgba, on_hit=None):
+def run_finder(cmd, rgba, on_hit=None, verifier=None):
     """Run a finder and verify its hits. Ctrl+C ends the whole search, never a fallback.
     If on_hit(why, path) returns True the finder is stopped; the rest of its output is
     still verified and STOPPED_BY_US is returned."""
@@ -250,7 +256,7 @@ def run_finder(cmd, rgba, on_hit=None):
                     LAST_ROLLOVER = None
             if line.startswith("HIT "):
                 f = line.rsplit("file=", 1)[1].strip()
-                ok, msg = verify(rgba, f)
+                ok, msg = (verifier or verify)(rgba, f)
                 print(f"  verify: {'OK' if ok else 'FAIL'} {msg}", flush=True)
                 if ok and on_hit and on_hit(line.split()[1], f) and not asked_stop:
                     asked_stop = True
@@ -466,6 +472,158 @@ def verify(base_rgba, found_path):
     return True, f"https://textures.minecraft.net/texture/{want}{wm}"
 
 
+# ---- NameMC mode -------------------------------------------------------------------------------
+# NameMC id = first 8 bytes of SHA-256( be32(w) || be32(h) || RGBA, RGB = 0 where alpha == 0 ).
+NAMEMC_KNOBS = 3
+MOJANG_TAIL = {(x, H - 1) for x in range(W - 6, W)}  # pixels the Mojang fast modes permute
+
+
+def namemc_id(rgba):
+    buf = bytearray(struct.pack(">II", W, H))
+    for i in range(0, len(rgba), 4):
+        if rgba[i + 3]:
+            buf += rgba[i:i + 4]
+        else:
+            buf += b"\x00\x00\x00\x00"
+    return hashlib.sha256(buf).hexdigest()[:16]
+
+
+def namemc_knob_pixels(rgba, unused_only=False, avoid=()):
+    """The three NameMC knob pixels, in message order, plus the list of all eligible ones.
+    Eligible: alpha 0 and unused (never sampled) or, unless unused_only, overlay. Never base-layer.
+    The latest ones in the file are taken, except the Mojang fast-mode tail so both modes combine."""
+    base, over = masks()
+    elig = []
+    for y in range(H):
+        for x in range(W):
+            if rgba[(y * W + x) * 4 + 3] or (x, y) in base or (x, y) in avoid:
+                continue
+            if (x, y) in over and unused_only:
+                continue
+            elig.append((x, y))
+    elig.sort(key=lambda p: (p[1], p[0]), reverse=True)
+    pref = [p for p in elig if p not in MOJANG_TAIL] or elig
+    pick = pref[:NAMEMC_KNOBS]
+    if len(pick) < NAMEMC_KNOBS:
+        sys.exit(f"only {len(elig)} usable pixels for the NameMC knob; need {NAMEMC_KNOBS}")
+    return sorted(pick, key=lambda p: (p[1], p[0])), elig
+
+
+def verify_namemc(base_rgba, found_path):
+    """FOUND hashes to its name under the NameMC formula, differs from BASE only in knob pixels
+    (alpha 0 -> 1 on overlay/unused pixels) and the watermark (RGB under alpha 0 on unused pixels)."""
+    data = open(found_path, "rb").read()
+    want = os.path.splitext(os.path.basename(found_path))[0]
+    rgba = load_rgba(found_path)
+    if namemc_id(rgba) != want:
+        return False, "NameMC id of the file does not match its name"
+    if mojang_png(rgba) != data:
+        return False, "file is not in Mojang's encoding"
+    base, over = masks()
+    knobs = 0
+    for y in range(H):
+        for x in range(W):
+            i = (y * W + x) * 4
+            if rgba[i:i + 4] == base_rgba[i:i + 4]:
+                continue
+            unused = (x, y) not in base and (x, y) not in over
+            if base_rgba[i + 3] == 0 and rgba[i + 3] == 1 and ((x, y) in over or unused):
+                knobs += 1
+            elif base_rgba[i + 3] == 0 and rgba[i + 3] == 0 and unused:
+                pass  # watermark: RGB under alpha 0 in the unused area
+            else:
+                return False, f"unexpected change at ({x},{y})"
+    if knobs != NAMEMC_KNOBS:
+        return False, f"{knobs} knob pixels changed, expected {NAMEMC_KNOBS}"
+    moj = texture_id(data)
+    return True, f"https://namemc.com/skin/{want}  mojang https://textures.minecraft.net/texture/{moj}"
+
+
+def cmd_namemc_id(paths):
+    for p in paths:
+        rgba = load_rgba(p)
+        print(f"{namemc_id(rgba)}  {p}  (mojang {texture_id(mojang_png(rgba))})")
+
+
+def namemc_search(path, args, unused_only, out, gpu, watermark, all_mode):
+    orig = load_rgba(path)
+    rgba = bytearray(orig)
+    wm = apply_watermark(rgba, avoid=MOJANG_TAIL) if watermark else []
+    if watermark:
+        print(f"watermark at {wm}" if wm else "warning: no free unused pixels for the watermark", flush=True)
+    knobs, elig = namemc_knob_pixels(rgba, unused_only, avoid=set(wm))
+    pref = [(W - 9 + i, H - 1) for i in range(NAMEMC_KNOBS)]  # (55-57, 63)
+    if knobs != pref and not unused_only:
+        print(f"note: preferred pixels {pref} are not all eligible; using {knobs}", flush=True)
+    for x, y in knobs:
+        i = (y * W + x) * 4
+        rgba[i:i + 4] = b"\x00\x00\x00\x01"
+    name = os.path.splitext(os.path.basename(path))[0]
+    outdir = out or os.path.join(HERE, "found", name + "_namemc")
+    os.makedirs(outdir, exist_ok=True)
+    rgbap = os.path.join(outdir, "base.rgba")
+    with open(rgbap, "wb") as f:
+        f.write(rgba)
+    kopt = ",".join(f"{x},{y}" for x, y in knobs)
+    print(f"original NameMC id {namemc_id(orig)}; knob pixels {knobs} (alpha 1); "
+          f"{len(elig)} eligible", flush=True)
+    ext = ".exe" if os.name == "nt" else ""
+    cpu = os.path.join(HERE, "namemcfinder" + ext)
+    gpuexe = os.path.join(HERE, "namemcgpu" + ext)
+    if not os.path.exists(cpu):
+        sys.exit("namemcfinder not found (build it with build.ps1)")
+
+    def launch(fargs, on_hit=None):
+        if gpu:
+            if not os.path.exists(gpuexe):
+                print("namemcgpu not found (build it with build.ps1); falling back to CPU", flush=True)
+            else:
+                print("gpu mode: namemcgpu", flush=True)
+                rc = run_finder([gpuexe, rgbap, outdir, "-k", kopt, "--render-exe", cpu, *fargs],
+                                orig, on_hit, verify_namemc)
+                if rc in (0, STOPPED_BY_US):
+                    return rc
+                print(f"namemcgpu failed (rc={rc}, 5 = correctness gate failed); falling back to CPU", flush=True)
+        print("cpu mode: namemcfinder", flush=True)
+        return run_finder([cpu, rgbap, outdir, "-k", kopt, *fargs], orig, on_hit, verify_namemc)
+
+    if not all_mode:
+        launch(args)
+        return
+    remaining, rest = split_targets(args)
+    if not remaining:
+        sys.exit("--all needs at least one -p, -s or -z target")
+    found = {}
+    while remaining:
+        print(f"--all: still looking for {', '.join(remaining)}", flush=True)
+        newly, keep, firsts = [], set(), {}
+        before = {f for f in os.listdir(outdir) if f.endswith(".png")}
+
+        def on_hit(why, p):
+            t = hit_target(why, remaining)
+            if t and t not in newly:
+                newly.append(t)
+                keep.add(os.path.basename(p))
+                firsts[t] = os.path.splitext(os.path.basename(p))[0]
+            return bool(newly)
+        r = launch(target_args(remaining) + rest, on_hit)
+        for t in newly:
+            remaining.remove(t)
+            found[t] = firsts[t]
+        extra = {f for f in os.listdir(outdir) if f.endswith(".png")} - before - keep
+        for f in extra:
+            os.remove(os.path.join(outdir, f))
+        if extra:
+            print(f"--all: removed {len(extra)} duplicate hit(s) from the same batch", flush=True)
+        if r != STOPPED_BY_US and not newly:
+            print(f"finder exited (rc={r}) before all targets were found", flush=True)
+            break
+    if not remaining:
+        print("--all: every target found:", flush=True)
+        for t, f in found.items():
+            print(f"  {t:<20} https://namemc.com/skin/{f}", flush=True)
+
+
 def main():
     a = sys.argv[1:]
     unused_only = "--unused-only" in a
@@ -496,6 +654,10 @@ def main():
         cmd_knobs(a[1], unused_only)
     elif len(a) >= 2 and a[0] == "search":
         cmd_search(a[1], a[2:], unused_only, generic, k, out, gpu, watermark, all_mode, require_fast)
+    elif len(a) >= 2 and a[0] == "namemc":
+        namemc_search(a[1], a[2:], unused_only, out, gpu, watermark, all_mode)
+    elif len(a) >= 2 and a[0] == "namemc-id":
+        cmd_namemc_id(a[1:])
     elif len(a) >= 2 and a[0] == "detect":
         cmd_detect(a[1:])
     elif len(a) == 3 and a[0] == "verify":

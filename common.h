@@ -143,11 +143,12 @@ __attribute__((unused)) static void arena_free(voidpf op, voidpf p) { (void)op; 
 typedef struct { uint64_t val, mask; int suffix; char text[17]; } pat_t;
 static pat_t pats[MAX_PAT];
 static int npats = 0;
+static int pat_fixed_width = 0;   /* namemcfinder: fixed-width id, prefixes may start with 0 */
 
 static int parse_pat(const char *hex, int suffix) {
     size_t n = strlen(hex);
     if (n == 0 || n > 16 || npats >= MAX_PAT) return -1;
-    if (!suffix && hex[0] == '0') return -1;   /* prefixes match the trimmed id, which never starts with 0 */
+    if (!suffix && hex[0] == '0' && !pat_fixed_width) return -1;   /* prefixes match the trimmed id, which never starts with 0 */
     pat_t *p = &pats[npats];
     p->val = 0; p->mask = 0; p->suffix = suffix;
     for (size_t i = 0; i < n; i++) {

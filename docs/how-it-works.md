@@ -142,3 +142,48 @@ Result so far: an 11-zero id, `00000000000ce817…`, live as
 In a ~64M-skin archive the previous shortest real skin link had 8 zeros.
 
 `pixel-map.svg` is generated from the same layout tables the tool uses: `py docs/make_pixel_map.py`.
+
+## 6. NameMC ids
+
+NameMC identifies a skin by a different hash than Mojang's texture id:
+
+```
+id = first 16 hex digits of SHA-256( be32(width) || be32(height) || RGBA pixels, R=G=B=0 where alpha == 0 )
+```
+
+It hashes pixels, not the PNG file, so the compression tricks of sections 3 and 4 are not needed. Zeroing RGB
+under alpha 0 also means the Mojang knob has no effect on it.
+
+**Knob.** Three pixels get alpha 1 and a varying RGB. A pixel is eligible if it is currently alpha 0 and in
+the overlay layer or unused. Base-layer pixels and pixels that already have alpha > 0 are never changed.
+
+| Mode | Pixels on the test skin | SHA blocks per candidate |
+|---|---|---|
+| default | (55, 56, 57; 63), end of the left sleeve overlay, just before the Mojang tail (58-63, 63) | 2 |
+| `--unused-only` | (61, 62, 63; 51), unused corner, never sampled by the model | 50 |
+
+At alpha 1/255 the default pixels should be invisible in game, but this has not been checked in game yet.
+The unused pixels need no check. The watermark is kept; it is alpha 0 and does not affect the id.
+
+**Search.** The message is 16392 bytes. SHA-256 is resumed from a midstate over the blocks before the first
+knob pixel. A 64-bit counter fills the 9 RGB bytes (one pixel is one 32-bit message word). The last block
+has the same message for every candidate, so on the GPU its K+W constants are precomputed, and one thread
+hashes 1024 counters that differ only in the last pixel, which shares the work before that word.
+
+**Combining with a Mojang id.** The Mojang search changes only RGB under alpha 0 (and the alpha-0
+watermark), which NameMC ignores. So: `namemc` first, then `search` on the result. The alpha-1 pixels are
+fixed for `search`, and `verify` still passes. Side effect: the bytes next to the tail often prevent the
+one-block layout of GPU fast mode, which then runs at about 2.1 G/s instead of 3.9 G/s.
+
+| Mode | Rate |
+|---|---|
+| NameMC, CPU, default knob | ~135M/s |
+| NameMC, GPU, default knob | ~2.8G/s |
+| NameMC, CPU, `--unused-only` | ~6.8M/s |
+| NameMC, GPU, `--unused-only` | ~148M/s |
+
+A pure SHA-256 kernel on this GPU does ~4.5G one-block hashes/s, so the 2-block default is near what the
+hardware allows.
+
+**Unverified.** NameMC's handling of ids with leading zeros (whether the URL shows 16 digits or trims them).
+The tool matches on the fixed 16-digit id.

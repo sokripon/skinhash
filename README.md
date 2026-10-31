@@ -14,6 +14,7 @@ that re-encode, so those bytes are free knobs.
 ```
 gcc -O3 -march=native -Wall -Wextra -o fastfinder.exe fastfinder.c -lz -lpthread
 gcc -O3 -march=native -Wall -Wextra -o hashfinder.exe hashfinder.c -lz -lpthread
+gcc -O3 -march=native -Wall -Wextra -o namemcfinder.exe namemcfinder.c -lz -lpthread   # NameMC mode (below)
 
 py skinhash.py predict skins/me.png                  # id Mojang would assign
 py skinhash.py search  skins/me.png -p c0ffee        # id (trimmed) starts with c0ffee
@@ -148,6 +149,66 @@ at random. A restart takes well under a second.
 Limits: at most 4096 hits are kept per kernel launch (use a stricter pattern if you see the warning), and
 `-t` is accepted and ignored. The extra gpufinder options for rollover and benchmarking are
 `--tried-offset N`, `--time-offset S` and `--bench-secs S`.
+
+## NameMC mode
+
+NameMC's skin id (`namemc.com/skin/<16 hex>`) is a different hash from Mojang's texture id:
+
+```
+first 8 bytes (16 hex) of SHA-256( uint32_be(width) || uint32_be(height) || RGBA pixels, row-major,
+                                   with R=G=B set to 0 wherever alpha == 0 )
+```
+
+Checked on about 1000 skins and on the skins in this repo. Because RGB under alpha 0 is zeroed, the Mojang
+knob does nothing here. The NameMC knob is a pixel with alpha 1 and a free RGB.
+
+```
+py skinhash.py namemc-id skins/me.png                    # NameMC id (and Mojang id) of files
+py skinhash.py namemc skins/me.png -p beef               # id starts with beef
+py skinhash.py namemc skins/me.png --gpu -p 0000 -n 3    # prefixes may start with 0 (fixed 16 digits)
+py skinhash.py namemc skins/me.png --gpu -s cafe --all   # also -z N, -t, -S, -b, --unused-only, --out DIR
+```
+
+Options as for `search` (`-p/-s/-z/-n/-t/-S/-b`, `--gpu`, `--all`, `--out`, default `found/<skin>_namemc/`).
+`-z N` means N leading zero nibbles of the 16-digit id. `--gpu` falls back to the CPU if namemcgpu fails.
+Every hit is checked by `skinhash.py`: the recomputed NameMC id equals the filename, only knob pixels changed
+(alpha 0 to 1) plus the watermark, and all knob pixels are overlay or unused. The hit line also prints the
+Mojang texture link of the file. Files are written in Mojang's PNG encoding.
+
+Knob pixels (3 pixels = 9 RGB bytes, a 64-bit counter):
+
+- Default: overlay or unused pixels that are fully transparent get alpha 1. The latest eligible pixels
+  before the Mojang fast-mode tail are used: (55-57, 63) on the test skin. Base-layer pixels and pixels
+  with alpha > 0 are never touched. At 1/255 opacity they should be invisible, but this needs an in-game
+  check; it is not verified.
+- `--unused-only`: only pixels no model face samples. Never drawn at all, so certainly invisible. On the
+  test skin they are (61-63, 51), which is 50 SHA blocks per candidate instead of 2.
+
+Finders: `namemcfinder.c` (CPU, zlib only for writing the hit PNG) and `namemcgpu.cu` (CUDA). Both resume
+SHA-256 from a midstate over the fixed blocks. The GPU must reproduce 96 CPU test vectors before searching
+(exit 5 otherwise), every hit is re-hashed on the CPU, and the PNG is written by `namemcfinder --render`.
+
+Measured (12 threads, RTX 5060 Ti), candidates per second:
+
+| mode           | CPU     | GPU     |
+|----------------|---------|---------|
+| default knob   | ~135M   | ~2.8G   |
+| `--unused-only`| ~6.8M   | ~148M   |
+
+A 16^n prefix takes 16^n / rate: 8 hex digits ~1.5 s, 10 digits ~6.5 min, 12 digits ~28 h on the GPU.
+
+Combining with the Mojang id: NameMC ignores RGB under alpha 0 and the Mojang search only changes RGB under
+alpha 0, so run the NameMC search first, then `search` on its output. The alpha-1 pixels are not knobs for
+`search`, and the NameMC id of the result is the same. Limit: the extra bytes next to the tail usually stop
+the GPU Mojang search from finding a one-block layout, so it runs at ~2.1G/s instead of ~3.9G/s.
+
+```
+py skinhash.py namemc skins/me.png --gpu -p beef -n 1
+py skinhash.py search found/me_namemc/<id>.png --gpu -p cafe -n 1
+```
+
+Unverified: whether NameMC shows or accepts ids with leading zeros as 16 digits. The tool treats the id as
+fixed width and matches prefixes on that.
 
 ## Watermark
 

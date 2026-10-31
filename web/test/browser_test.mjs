@@ -107,7 +107,7 @@ try {
     const v = spawnSync("py", ["skinhash.py", "verify", skin, d.f], { cwd: repo, encoding: "utf8" });
     check(v.status === 0 && /^OK/.test(v.stdout), `skinhash.py verify ${d.id.slice(0, 20)}...: ${v.stdout.trim().slice(0, 100)}`);
     const t = spawnSync("py", ["skinhash.py", "detect", d.f], { cwd: repo, encoding: "utf8" });
-    check(/YES/.test(t.stdout) && /v2/.test(t.stdout), `skinhash.py detect: ${t.stdout.trim().slice(0, 100)}`);
+    check(/YES/.test(t.stdout) && /v3 at \(0, 7\)/.test(t.stdout), `skinhash.py detect: ${t.stdout.trim().slice(0, 100)}`);
   }
 
   // ---------- NameMC mode ----------
@@ -211,7 +211,7 @@ try {
     const bv = spawnSync("py", ["skinhash.py", "verify", interF, finalF], { cwd: repo, encoding: "utf8" });
     check(bv.status === 0 && /^OK/.test(bv.stdout), `Both: skinhash.py verify <phase-1 hit> <final>: ${bv.stdout.trim().slice(0, 80)}`);
     const bv0 = spawnSync("py", ["skinhash.py", "verify", skin, finalF], { cwd: repo, encoding: "utf8" });
-    console.log(`  info: skinhash.py verify <original> <final> = ${bv0.stdout.trim().slice(0, 90)} (the native Mojang verify treats the NameMC alpha-1 pixels as a visible change)`);
+    check(bv0.status === 0 && /^OK/.test(bv0.stdout), `Both: skinhash.py verify <original> <final>: ${bv0.stdout.trim().slice(0, 80)}`);
     const bid = spawnSync("py", ["skinhash.py", "namemc-id", finalF], { cwd: repo, encoding: "utf8" });
     check(bid.stdout.trim().startsWith(fin[0].id16), `Both: skinhash.py namemc-id shows ${bid.stdout.trim().split(/\s+/)[0]}`);
     check(path.basename(finalF).startsWith("cafe"), "Both: Mojang id starts with cafe");

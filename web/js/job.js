@@ -3,7 +3,7 @@
 import pako from "../vendor/pako.esm.mjs";
 import { W, H, ROW, RAW_LEN, DEFLATE_OPTS, rawScanlines, pngFromRaw } from "./png.js";
 import { sha256, sha256Blocks, stateToDigest, SHA_INIT, crc32 } from "./hash.js";
-import { knobPixels, applyWatermark } from "./model.js";
+import { knobPixels, applyWatermark, RESERVED } from "./model.js";
 
 export const MIN_K = 5;     // fewer than 5 pixels (15 values) gives too few orderings to be worth it
 export const MAX_K = 6;
@@ -46,6 +46,7 @@ export function prepareSkin(orig, { watermark = true, kmax = MAX_K } = {}) {
   const kset = new Set(knobs.map(([x, y]) => y * W + x));
   let kvis = 0;
   while (kvis < kmax && kset.has((H - 1) * W + (W - 1 - kvis))) kvis++;
+  for (const [x, y] of tail) if (RESERVED[y * W + x]) kvis = 0;   // never permute a pixel other software reads
   const kmaxUsable = Math.min(kvis, kmax);
   const eligible = kmaxUsable >= MIN_K;
   let reason = null;

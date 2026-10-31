@@ -20,7 +20,7 @@ py skinhash.py predict skins/me.png                  # id Mojang would assign
 py skinhash.py search  skins/me.png -p c0ffee        # id (trimmed) starts with c0ffee
 py skinhash.py search  skins/me.png -z 8             # keep ids with >= 8 leading zeros (shortest links)
 py skinhash.py search  skins/me.png -s dead -n 3     # id ends with dead, stop after 3 hits
-py skinhash.py verify  skins/me.png found/me/<id>.png
+py skinhash.py verify  skins/me.png found/me/<id>.png   # also accepts NameMC results (alpha 0 -> 1 knobs)
 py skinhash.py search  skins/me.png --gpu --fast -z 10 # never fall back to the slow generic search
 ```
 
@@ -216,15 +216,30 @@ Every search stamps an invisible signature so skins made with this tool can be r
 horizontally adjacent, fully transparent pixels in an unused part of the layout that no model face samples.
 Their RGB bytes, read left to right, spell the payload.
 
-- **v2 (current):** `sokripon skinhash` + byte `0x02` = 18 bytes = 6 pixels, normally (0,0)-(5,0), in the
-  unused top-left corner of the head layout. RGBA: `736f6b00 72697000 6f6e2000 736b6900 6e686100 73680200`.
+- **v3 (current):** `sokripon skinhash` + byte `0x03` = 18 bytes = 6 pixels, normally (0,7)-(5,7), in the
+  unused corner of the head layout. RGBA: `736f6b00 72697000 6f6e2000 736b6900 6e686100 73680300`.
+- **v2 (older runs):** the same with byte `0x02`, at (0,0)-(5,0). Moved because Mine Little Pony reads
+  (0,0)-(3,0). Still detected.
 - **v1 (older runs):** `SKHAS` + `0x01` padded with a 0 byte = 2 pixels at (0,0)-(1,0). Still detected.
 - **Visibility:** alpha is 0, so nothing shows in game or in image viewers. Mojang keeps RGB under alpha 0
   (confirmed by a real upload).
-- **Fallback:** if the preferred spot is not free (alpha > 0), the first free unused transparent run in scan
-  order is used. Detection scans the whole image.
+- **Fallback:** if the preferred spot is not free (alpha > 0), the first free unused transparent run that is
+  not reserved (below) in scan order is used. Detection scans the whole image.
 - **Speed:** the watermark sits in the fixed part of the image, so it costs no search speed. The fast modes
   avoid its byte values.
+
+### Reserved pixels
+
+Some mods read pixels as data, so no search pixel (Mojang or NameMC knob, fast-mode tail) and no watermark
+pixel is ever taken from this set, in any mode (`RESERVED` in `skinhash.py` and `web/js/model.js`):
+
+- Ears: marker block x0-3, y32-35 and emissive palette x52-55, y32-35
+- Mine Little Pony triggers: (0,0) (1,0) (2,0) (3,0) (0,1) (1,1) (2,1) (2,2); CPM's header is the blue of (0,0)
+- Tails mod: x56-61, y16-18
+- Vanilla deadmau5 ear box: x24-37, y0-6
+
+`docs/skin-areas.png` shows them. Fast mode is refused if one of its last K pixels were reserved (today's
+(58-63, 63) are not). Check with `py test_reserved.py`.
 
 Check a skin with `py skinhash.py detect FILE|ID|URL ...` (ids and URLs are downloaded from
 textures.minecraft.net). Turn the watermark off with `--no-watermark`.

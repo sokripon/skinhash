@@ -20,7 +20,7 @@ import skinhash  # noqa: E402
 S = 12                      # pixels per skin pixel
 OX, OY = 30, 70             # grid origin
 GW = 64 * S
-W, H = OX + GW + 40 + 450, OY + GW + 350
+W, H = OX + GW + 40 + 450, OY + GW + 400
 
 
 def font(size, bold=False):
@@ -59,7 +59,7 @@ emissive = {(x, y) for x in range(52, 56) for y in range(32, 36)}
 head_front = {(x, y) for x in range(8, 16) for y in range(8, 16)}
 mlp = {(0, 0): "race", (1, 0): "tail", (2, 0): "gender", (3, 0): "size",
        (0, 1): "glow", (1, 1): "wear", (2, 1): "tail shape", (2, 2): "priority"}
-wm = {(x, 0) for x in range(6)}
+wm = {(x, 7) for x in range(6)}
 mojang_k = {(x, 63) for x in range(58, 64)}
 namemc_k = {(x, 63) for x in range(55, 58)}
 unused_k = {(x, 51) for x in range(61, 64)}
@@ -181,8 +181,8 @@ def main():
     swatch("tails", C["tails"], "Tails  x56–61, y16/17/18", ["tail / ears / wings rows; on if (56,y) =",
                                                              "#FF10F0 and (57,y) = #B8E080 (as reported)"])
     d.text((lx, ly), "skinhash", font=F_B, fill=C["text"]); ly += 22
-    swatch("fill", C["wm"], "Watermark v2  (0–5,0)", ["alpha 0: can't trigger MLP (needs 255) or",
-                                                      "CPM (blue 0x6b ≠ 0x53); still best moved"])
+    swatch("fill", C["wm"], "Watermark v3  (0–5,7)", ["alpha 0, unused corner of the head,",
+                                                      "clear of every mod pixel above (v2 was at y0)"])
     swatch("fill", C["mojang"], "Mojang fast mode  (58|59–63,63)", ["RGB under alpha 0"])
     swatch("fill", C["namemc"], "NameMC default  (55–57,63)", ["alpha 0 → 1"])
     swatch("fill", C["unusedknob"], "--unused-only  (61–63,51)", ["Steve / typical skin"])
@@ -206,7 +206,7 @@ def main():
             d.text((lx + (x - x0) * z + 3, top + h * z + 2), str(x), font=F_S, fill=C["muted"])
         return top + h * z + 22
 
-    ly = inset("Zoom: x 0–7, y 0–2 (watermark under MLP triggers)", 0, 0, 8, 3, 26, ly + 6)
+    ly = inset("Zoom: x 0–7, y 0–7 (MLP triggers above the watermark)", 0, 0, 8, 8, 20, ly + 6)
     inset("Zoom: x 48–63, y 63 (search pixels)", 48, 63, 16, 1, 24, ly)
 
     d.text((OX, H - 30), "Checked against source: Ears 3d42f72, CPM 129b76f, Mine Little Pony 0b9e4af. "

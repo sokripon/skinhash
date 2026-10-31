@@ -13,7 +13,7 @@
       --all: run until every -p/-s/-z target has a hit. Restarts without each found target;
       -n is ignored.
       Every search adds an invisible watermark (6 transparent unused pixels whose RGB spells
-      "sokripon skinhash" + 02, normally at (0,0)-(5,0)). --no-watermark turns it off.
+      "sokripon skinhash" + 03, normally at (0,7)-(5,7)). --no-watermark turns it off.
   py skinhash.py verify BASE.png FOUND.png     -> FOUND looks identical in game and hashes to its name
   py skinhash.py namemc SKIN.png [--gpu] [--unused-only] [-p HEX] [-s HEX] [-z N] [-n N] [--out DIR] [--all]
       NameMC mode: finds a skin whose NameMC id (namemc.com/skin/<16 hex>) matches. The knob is three
@@ -57,14 +57,15 @@ OVERLAY_PARTS = [
 
 
 # Watermark: horizontally adjacent, fully transparent, unused pixels whose RGB bytes spell
-# the payload left to right. It starts at (0,0), the unused top-left corner of the head.
-# If that spot has alpha > 0, the first free unused run in scan order is used instead.
-# Detection scans the whole image.
-#   v2 (current): "sokripon skinhash" + 0x02            -> 6 pixels, (0,0)-(5,0)
+# the payload left to right. It goes at (0,7)-(5,7), unused and clear of the pixels other mods read
+# (see RESERVED). If that spot has alpha > 0, the first free unused, non-reserved run in scan order
+# is used instead. Detection scans the whole image and knows every version.
+#   v3 (current): "sokripon skinhash" + 0x03            -> 6 pixels, (0,7)-(5,7)
+#   v2 (old):     "sokripon skinhash" + 0x02            -> 6 pixels, (0,0)-(5,0)
 #   v1 (old):     "SKHAS" + 0x01                        -> 2 pixels, (0,0)-(1,0)
-WATERMARKS = {2: b"sokripon skinhash\x02", 1: b"SKHAS\x01"}
-WATERMARK_VERSION = 2
-WATERMARK_SPOT = (0, 0)
+WATERMARKS = {3: b"sokripon skinhash\x03", 2: b"sokripon skinhash\x02", 1: b"SKHAS\x01"}
+WATERMARK_VERSION = 3
+WATERMARK_SPOT = (0, 7)
 
 
 def wm_pixels(payload):
@@ -82,6 +83,17 @@ def box_pixels(u, v, w, h, d):
         for y in range(y0, y0 + rh):
             for x in range(x0, x0 + rw):
                 yield x, y
+
+
+# Pixels other software reads as data. No search pixel and no watermark pixel may ever come from here.
+# Same set in web/js/model.js.
+RESERVED = (
+    {(x, y) for x in range(0, 4) for y in range(32, 36)}      # Ears: marker block x0-3, y32-35
+    | {(x, y) for x in range(52, 56) for y in range(32, 36)}  # Ears: emissive palette x52-55, y32-35
+    | {(0, 0), (1, 0), (2, 0), (3, 0), (0, 1), (1, 1), (2, 1), (2, 2)}  # Mine Little Pony triggers (CPM header = (0,0))
+    | {(x, y) for x in range(56, 62) for y in range(16, 19)}  # Tails mod rows x56-61, y16-18
+    | set(box_pixels(24, 0, 6, 6, 1))                         # vanilla deadmau5 ear box x24-37, y0-6
+)
 
 
 def masks():
@@ -129,6 +141,8 @@ def knob_pixels(rgba, unused_only=False):
     for y in range(H):
         for x in range(W):
             a = rgba[(y * W + x) * 4 + 3]
+            if (x, y) in RESERVED:
+                continue
             unused = (x, y) not in base and (x, y) not in over
             clear_overlay = (x, y) in over and a == 0
             if unused and a == 0 or (not unused_only and clear_overlay):
@@ -165,7 +179,7 @@ def watermark_spot(rgba, n, avoid=()):
     base, over = masks()
     def free(x, y):
         return ((x, y) not in base and (x, y) not in over and (x, y) not in avoid
-                and rgba[(y * W + x) * 4 + 3] == 0)
+                and (x, y) not in RESERVED and rgba[(y * W + x) * 4 + 3] == 0)
     def run(x, y):
         return x + n <= W and all(free(x + j, y) for j in range(n))
     if run(*WATERMARK_SPOT):
@@ -370,6 +384,7 @@ def cmd_search(path, args, unused_only, generic=False, k=6, out=None, gpu=False,
     orig = load_rgba(path)
     rgba = bytearray(orig)
     tail = {(W - k + i, H - 1) for i in range(k)}  # the watermark must not take these
+    tail_ok = not (tail & RESERVED)  # fast mode permutes the RGB of these pixels
     wm = apply_watermark(rgba, avoid=tail) if watermark else []
     if watermark:
         print(f"watermark at {wm}" if wm else "warning: no free unused pixels for the watermark", flush=True)
@@ -385,9 +400,9 @@ def cmd_search(path, args, unused_only, generic=False, k=6, out=None, gpu=False,
     rgba = orig  # hits are verified against the original skin
     ext = ".exe" if os.name == "nt" else ""
     kset = set(kp)
-    fast_ok = not generic and all((W - k + i, H - 1) in kset for i in range(k))
+    fast_ok = not generic and tail_ok and all((W - k + i, H - 1) in kset for i in range(k))
     if require_fast and not fast_ok:
-        bad = [(W - k + i, H - 1) for i in range(k) if (W - k + i, H - 1) not in kset]
+        bad = [(W - k + i, H - 1) for i in range(k) if (W - k + i, H - 1) not in kset or (W - k + i, H - 1) in RESERVED]
         sys.exit(f"--fast: fast mode is not possible for this skin. The last {k} pixels must all be "
                  f"invisible (alpha 0, overlay or unused), but these are not: {bad}")
 
@@ -466,6 +481,12 @@ def verify(base_rgba, found_path):
             if rgba[i:i + 4] == base_rgba[i:i + 4]:
                 continue
             visible = (x, y) in base or ((x, y) in over and rgba[i + 3] != 0)
+            # NameMC knob: alpha 0 -> 1 on an overlay/unused pixel, any RGB. Not shown in game
+            # (alpha 1 of 255 is invisible), and not a pixel other software reads.
+            knob = (base_rgba[i + 3] == 0 and rgba[i + 3] == 1 and (x, y) not in base
+                    and (x, y) not in RESERVED)
+            if knob:
+                continue
             if visible or rgba[i + 3] != base_rgba[i + 3]:
                 return False, f"visible change at ({x},{y})"
     wm = "" if find_watermark(rgba) else " (no watermark)"
@@ -496,7 +517,7 @@ def namemc_knob_pixels(rgba, unused_only=False, avoid=()):
     elig = []
     for y in range(H):
         for x in range(W):
-            if rgba[(y * W + x) * 4 + 3] or (x, y) in base or (x, y) in avoid:
+            if rgba[(y * W + x) * 4 + 3] or (x, y) in base or (x, y) in avoid or (x, y) in RESERVED:
                 continue
             if (x, y) in over and unused_only:
                 continue
@@ -527,6 +548,8 @@ def verify_namemc(base_rgba, found_path):
             if rgba[i:i + 4] == base_rgba[i:i + 4]:
                 continue
             unused = (x, y) not in base and (x, y) not in over
+            if (x, y) in RESERVED:
+                return False, f"change at reserved pixel ({x},{y})"
             if base_rgba[i + 3] == 0 and rgba[i + 3] == 1 and ((x, y) in over or unused):
                 knobs += 1
             elif base_rgba[i + 3] == 0 and rgba[i + 3] == 0 and unused:

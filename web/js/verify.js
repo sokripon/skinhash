@@ -2,7 +2,7 @@
 import { decodePng, mojangPng, pngFromRaw, rawScanlines, W, H } from "./png.js";
 import { sha256, toHex } from "./hash.js";
 import { decodePerm, fastFile, fastDigest, permRaw } from "./job.js";
-import { isVisible, MASKS } from "./model.js";
+import { isVisible, MASKS, RESERVED } from "./model.js";
 import { matchTargets } from "./targets.js";
 import { namemcIdHex, namemcMessage, nmPixels, nmDigestFull } from "./namemc.js";
 
@@ -41,6 +41,7 @@ export async function verifyHit(job, prep, idx, targets) {
       changed++;
       if (dec[i * 4 + 3] !== orig[i * 4 + 3]) return { ok: false, error: `alpha changed at pixel ${i}` };
       if (!allowed.has(i)) return { ok: false, error: `unexpected change at pixel (${i % W},${Math.floor(i / W)})` };
+      if (RESERVED[i]) return { ok: false, error: `change at reserved pixel (${i % W},${Math.floor(i / W)})` };
       if (isVisible(i, dec[i * 4 + 3])) return { ok: false, error: `visible change at pixel (${i % W},${Math.floor(i / W)})` };
     }
     if (!eq(mojangPng(dec), full)) return { ok: false, error: "re-encode of the decoded pixels differs" };
@@ -72,6 +73,7 @@ export async function verifyNmHit(prep, c, targets) {
       let same = true;
       for (let k = 0; k < 4; k++) if (dec[i * 4 + k] !== orig[i * 4 + k]) same = false;
       if (same) continue;
+      if (RESERVED[i]) return { ok: false, error: `change at reserved pixel (${i % W},${Math.floor(i / W)})` };
       if (knobs.has(i)) {
         if (orig[i * 4 + 3] !== 0 || dec[i * 4 + 3] !== 1 || MASKS.base[i]) return { ok: false, error: `bad knob pixel ${i}` };
         nk++;
@@ -107,6 +109,7 @@ export async function verifyBoth(orig, nmPrep, r1, r2, nmTargets, mojTargets) {
       let same = true;
       for (let c = 0; c < 4; c++) if (dec[i * 4 + c] !== orig[i * 4 + c]) same = false;
       if (same) continue;
+      if (RESERVED[i]) return { ok: false, error: `change at reserved pixel (${i % W},${Math.floor(i / W)})` };
       if (knobs.has(i)) {
         if (orig[i * 4 + 3] !== 0 || dec[i * 4 + 3] !== 1 || MASKS.base[i]) return { ok: false, error: `bad NameMC knob pixel ${i}` };
         nk++;

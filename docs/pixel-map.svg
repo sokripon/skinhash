@@ -1,12 +1,12 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 874 672" width="874" height="672" font-family="Segoe UI, Helvetica, Arial, sans-serif">
 <rect width="874" height="672" rx="12" fill="#ffffff"/>
 <text x="24" y="30" font-size="18" font-weight="600" fill="#1d1d1f">The 64×64 skin texture: what the tool may change</text>
-<rect x="24" y="56" width="9" height="9" fill="#f0a030"/>
-<rect x="33" y="56" width="9" height="9" fill="#f0a030"/>
-<rect x="42" y="56" width="9" height="9" fill="#f0a030"/>
-<rect x="51" y="56" width="9" height="9" fill="#f0a030"/>
-<rect x="60" y="56" width="9" height="9" fill="#f0a030"/>
-<rect x="69" y="56" width="9" height="9" fill="#f0a030"/>
+<rect x="24" y="56" width="9" height="9" fill="#f4f4f2"/>
+<rect x="33" y="56" width="9" height="9" fill="#f4f4f2"/>
+<rect x="42" y="56" width="9" height="9" fill="#f4f4f2"/>
+<rect x="51" y="56" width="9" height="9" fill="#f4f4f2"/>
+<rect x="60" y="56" width="9" height="9" fill="#f4f4f2"/>
+<rect x="69" y="56" width="9" height="9" fill="#f4f4f2"/>
 <rect x="78" y="56" width="9" height="9" fill="#f4f4f2"/>
 <rect x="87" y="56" width="9" height="9" fill="#f4f4f2"/>
 <rect x="96" y="56" width="9" height="9" fill="#8aa2c8"/>
@@ -449,12 +449,12 @@
 <rect x="573" y="110" width="9" height="9" fill="#f4f4f2"/>
 <rect x="582" y="110" width="9" height="9" fill="#f4f4f2"/>
 <rect x="591" y="110" width="9" height="9" fill="#f4f4f2"/>
-<rect x="24" y="119" width="9" height="9" fill="#f4f4f2"/>
-<rect x="33" y="119" width="9" height="9" fill="#f4f4f2"/>
-<rect x="42" y="119" width="9" height="9" fill="#f4f4f2"/>
-<rect x="51" y="119" width="9" height="9" fill="#f4f4f2"/>
-<rect x="60" y="119" width="9" height="9" fill="#f4f4f2"/>
-<rect x="69" y="119" width="9" height="9" fill="#f4f4f2"/>
+<rect x="24" y="119" width="9" height="9" fill="#f0a030"/>
+<rect x="33" y="119" width="9" height="9" fill="#f0a030"/>
+<rect x="42" y="119" width="9" height="9" fill="#f0a030"/>
+<rect x="51" y="119" width="9" height="9" fill="#f0a030"/>
+<rect x="60" y="119" width="9" height="9" fill="#f0a030"/>
+<rect x="69" y="119" width="9" height="9" fill="#f0a030"/>
 <rect x="78" y="119" width="9" height="9" fill="#f4f4f2"/>
 <rect x="87" y="119" width="9" height="9" fill="#f4f4f2"/>
 <rect x="96" y="119" width="9" height="9" fill="#8aa2c8"/>
@@ -4128,8 +4128,8 @@
 <text x="240.0" y="564.0" font-size="11" text-anchor="middle" fill="#1d1d1f" stroke="#ffffff" stroke-width="3" paint-order="stroke">left leg</text>
 <text x="384.0" y="564.0" font-size="11" text-anchor="middle" fill="#1d1d1f" stroke="#ffffff" stroke-width="3" paint-order="stroke">left arm</text>
 <text x="528.0" y="564.0" font-size="11" text-anchor="middle" fill="#1d1d1f" stroke="#ffffff" stroke-width="3" paint-order="stroke">left sleeve</text>
-<path d="M51 65 L51 48" stroke="#b36b00" stroke-width="1.5"/>
-<text x="57" y="46" font-size="11" fill="#b36b00">watermark (0,0)–(5,0)</text>
+<path d="M51 128 L51 48" stroke="#b36b00" stroke-width="1.5"/>
+<text x="57" y="46" font-size="11" fill="#b36b00">watermark v3 (0,7)–(5,7)</text>
 <path d="M573 632 L573 646" stroke="#c0282d" stroke-width="1.5"/>
 <text x="573" y="660" font-size="11" text-anchor="end" fill="#c0282d">fast-mode pixels: last 5 (GPU) or 6 (CPU) of row 63</text>
 <rect x="628" y="62" width="16" height="16" rx="3" fill="#8aa2c8" stroke="#888" stroke-width="0.6"/>

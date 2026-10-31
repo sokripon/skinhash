@@ -1,4 +1,4 @@
-// Skin model: UV masks, invisible ("knob") pixels, watermark v2. Ported from skinhash.py.
+// Skin model: UV masks, invisible ("knob") pixels, watermark v3. Ported from skinhash.py.
 import { W, H } from "./png.js";
 
 const BASE_PARTS = [
@@ -16,10 +16,11 @@ const OVERLAY_PARTS = [
 
 export const WATERMARKS = {};
 const wmBytes = (s, ver) => Uint8Array.from([...s].map((c) => c.charCodeAt(0)).concat([ver]));
+WATERMARKS[3] = wmBytes("sokripon skinhash", 3);
 WATERMARKS[2] = wmBytes("sokripon skinhash", 2);
 WATERMARKS[1] = wmBytes("SKHAS", 1);
-export const WATERMARK_VERSION = 2;
-export const WATERMARK_SPOT = [0, 0];
+export const WATERMARK_VERSION = 3;
+export const WATERMARK_SPOT = [0, 7];   // (0,7)-(5,7); v2 used (0,0)-(5,0), which Mine Little Pony reads
 
 export function wmPixels(payload) {
   const p = Array.from(payload);
@@ -39,6 +40,19 @@ function boxPixels(set, [u, v, w, h, d]) {
     for (let y = y0; y < y0 + rh; y++) for (let x = x0; x < x0 + rw; x++) set[y * W + x] = 1;
 }
 
+/** Pixels other software reads as data (index y*64+x). No search pixel and no watermark pixel may come from here.
+ *  Same set as RESERVED in skinhash.py. */
+export const RESERVED = (() => {
+  const r = new Uint8Array(W * H);
+  const rect = (x0, y0, x1, y1) => { for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) r[y * W + x] = 1; };
+  rect(0, 32, 3, 35);     // Ears: marker block x0-3, y32-35
+  rect(52, 32, 55, 35);   // Ears: emissive palette x52-55, y32-35
+  for (const [x, y] of [[0, 0], [1, 0], [2, 0], [3, 0], [0, 1], [1, 1], [2, 1], [2, 2]]) r[y * W + x] = 1;   // Mine Little Pony triggers (CPM header = (0,0))
+  rect(56, 16, 61, 18);   // Tails mod rows x56-61, y16-18
+  boxPixels(r, [24, 0, 6, 6, 1]);   // vanilla deadmau5 ear box x24-37, y0-6
+  return r;
+})();
+
 /** base[i]/over[i] = 1 if pixel i (y*64+x) is sampled by the base / overlay layer. */
 export const MASKS = (() => {
   const base = new Uint8Array(W * H), over = new Uint8Array(W * H);
@@ -53,6 +67,7 @@ export function knobPixels(rgba) {
   const knobs = [];
   for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
     const i = y * W + x, a = rgba[i * 4 + 3];
+    if (RESERVED[i]) continue;
     const unused = !base[i] && !over[i];
     if (a === 0 && (unused || over[i])) knobs.push([x, y]);
   }
@@ -70,7 +85,7 @@ function matchesAt(rgba, x, y, px) {
 
 /** [version, x, y] of a known watermark, or null. */
 export function findWatermark(rgba) {
-  for (const ver of [2, 1]) {
+  for (const ver of [3, 2, 1]) {
     const px = wmPixels(WATERMARKS[ver]);
     for (let y = 0; y < H; y++) for (let x = 0; x + px.length <= W; x++)
       if (matchesAt(rgba, x, y, px)) return [ver, x, y];
@@ -81,7 +96,7 @@ export function findWatermark(rgba) {
 function watermarkSpot(rgba, n, avoid) {
   const { base, over } = MASKS;
   const av = new Set(avoid.map(([x, y]) => y * W + x));
-  const free = (x, y) => { const i = y * W + x; return !base[i] && !over[i] && !av.has(i) && rgba[i * 4 + 3] === 0; };
+  const free = (x, y) => { const i = y * W + x; return !base[i] && !over[i] && !RESERVED[i] && !av.has(i) && rgba[i * 4 + 3] === 0; };
   const run = (x, y) => { if (x + n > W) return false; for (let j = 0; j < n; j++) if (!free(x + j, y)) return false; return true; };
   if (run(...WATERMARK_SPOT)) return WATERMARK_SPOT;
   for (let y = 0; y < H; y++) for (let x = 0; x + n <= W; x++) if (run(x, y)) return [x, y];

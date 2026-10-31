@@ -31,7 +31,7 @@ invisible variations until one hashes to something you like: a hex word at the s
 
 | Mode | Pixels changed | Coordinates on the test skin |
 |---|---|---|
-| Watermark (every mode) | 6 unused transparent pixels; RGB spells `sokripon skinhash` + version byte `0x02` | (0, 0)–(5, 0), top-left corner of the head layout |
+| Watermark (every mode) | 6 unused transparent pixels; RGB spells `sokripon skinhash` + version byte `0x03` | (0, 7)–(5, 7), unused corner of the head layout (v2 used (0, 0)–(5, 0), which Mine Little Pony reads) |
 | GPU fast mode (`--gpu`) | the last 5 pixels of the file, as long as they are invisible | (59–63, 63), end of the left sleeve overlay |
 | CPU fast mode (default) | the last 6 pixels of the file, as long as they are invisible | (58–63, 63), end of the left sleeve overlay |
 | Generic mode (`--generic`, or when the last pixels are visible) | a 64-bit counter in the RGB of the last 3 invisible pixels found | (61–63, 63) |
@@ -44,7 +44,11 @@ transparent overlay pixel or an unused pixel. Otherwise it falls back to generic
 pixels. `--fast` stops with the reason instead of falling back to the 300× slower generic search.
 
 Before you upload, `verify` re-checks every hit: the file hashes to its name, real zlib reproduces it byte
-for byte, and no visible pixel differs from the original skin.
+for byte, and no visible pixel differs from the original skin. A pixel whose alpha went 0 to 1 on an overlay
+or unused pixel is accepted as a NameMC knob (any RGB), so `verify` also passes for NameMC and Both results.
+
+No pixel chosen by the tool comes from the set that other mods read as data (Ears marker and palette, Mine
+Little Pony triggers, Tails rows, deadmau5 ear box; `RESERVED` in `skinhash.py`, shown in `skin-areas.png`).
 
 ### Are the changes really invisible?
 
@@ -170,7 +174,7 @@ hashes 1024 counters that differ only in the last pixel, which shares the work b
 
 **Combining with a Mojang id.** The Mojang search changes only RGB under alpha 0 (and the alpha-0
 watermark), which NameMC ignores. So: `namemc` first, then `search` on the result. The alpha-1 pixels are
-fixed for `search`, and `verify` still passes. Side effect: the bytes next to the tail often prevent the
+fixed for `search`, and `verify` still passes (also against the original skin). Side effect: the bytes next to the tail often prevent the
 one-block layout of GPU fast mode, which then runs at about 2.1 G/s instead of 3.9 G/s.
 
 | Mode | Rate |

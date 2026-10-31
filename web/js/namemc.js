@@ -4,7 +4,7 @@
 //   kp[2] RGB = c & 0xFFFFFF, kp[1] RGB = (c >> 24) & 0xFFFFFF, kp[0] RGB = c >> 48   (kp in message order)
 import { W, H } from "./png.js";
 import { sha256, sha256Blocks, toHex, SHA_INIT } from "./hash.js";
-import { MASKS, applyWatermark } from "./model.js";
+import { MASKS, RESERVED, applyWatermark } from "./model.js";
 
 export const NK = 3;
 export const MSG_LEN = 8 + W * H * 4;   // 16392
@@ -38,7 +38,7 @@ export function prepareNameMc(orig, { watermark = true, unusedOnly = false } = {
   const elig = [];
   for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
     const i = y * W + x;
-    if (rgba[i * 4 + 3] || base[i] || wmSet.has(i)) continue;
+    if (rgba[i * 4 + 3] || base[i] || RESERVED[i] || wmSet.has(i)) continue;
     if (over[i] && unusedOnly) continue;
     elig.push(i);
   }

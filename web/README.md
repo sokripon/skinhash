@@ -17,7 +17,7 @@ answers `text/plain` for `.js` and the browser refuses to load the ES modules. N
 
 | Web | Native |
 |---|---|
-| `js/model.js` | `skinhash.py`: UV masks, `knob_pixels`, watermark v2 |
+| `js/model.js` | `skinhash.py`: UV masks, `knob_pixels`, watermark v3, `RESERVED` pixels |
 | `js/png.js` | PNG decode without canvas (canvas would premultiply alpha and destroy hidden RGB); Mojang re-encode (`mojang_png`) |
 | `js/job.js` | `fastfinder.c`: `setup_fast`, `parse_deflate`, `--auto`, self-test, test vectors, index to permutation |
 | `js/hash.js` | SHA-256 (midstate), CRC-32 |
@@ -53,9 +53,9 @@ loaded as the base skin, the Mojang search. The alpha-1 NameMC pixels are fixed,
 (otherwise it stops with a message). The final PNG is verified against the original skin (NameMC id as in phase
 1 and matching its targets, Mojang id matching its targets, only the NameMC knobs, the watermark and hidden RGB
 under alpha 0 differ) and shown with both links. The phases add up instead of multiplying (6 hex digits each is
-about 34 million tries instead of 16^12). With one group empty only the other phase runs. Note: the native
-`skinhash.py verify <original> <final>` rejects the result, because it treats the NameMC alpha-1 pixels as a
-visible change; `verify <phase-1 hit> <final>` passes.
+about 34 million tries instead of 16^12). With one group empty only the other phase runs. The native
+`skinhash.py verify <original> <final>` accepts the result too (it treats alpha 0 to 1 on overlay or unused pixels
+as a NameMC knob).
 
 Differences: the zlib stream comes from pako instead of C zlib (proven byte-identical, see below); fast mode
 only (no slow generic CPU mode); fast mode needs the last 5 pixels of the image invisible (the native tool asks

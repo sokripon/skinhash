@@ -34,7 +34,8 @@ PARTS = [
 
 def main():
     base, over = skinhash.masks()
-    wm = {(x, 0) for x in range(len(skinhash.wm_pixels(skinhash.WATERMARKS[skinhash.WATERMARK_VERSION])))}
+    n = len(skinhash.wm_pixels(skinhash.WATERMARKS[skinhash.WATERMARK_VERSION]))
+    wm = {(skinhash.WATERMARK_SPOT[0] + j, skinhash.WATERMARK_SPOT[1]) for j in range(n)}
     fast = {(x, 63) for x in range(58, 64)}  # last 5 (GPU, 1 SHA block) or 6 (CPU)
     W, H = OX * 2 + GRID + 250, OY + GRID + 40
     out = [f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {W} {H}" width="{W}" height="{H}" '
@@ -56,8 +57,8 @@ def main():
         cx, cy = OX + (x + w / 2) * C, OY + (y + h / 2) * C + 4
         out.append(f'<text x="{cx}" y="{cy}" font-size="11" text-anchor="middle" fill="#1d1d1f" '
                    f'stroke="#ffffff" stroke-width="3" paint-order="stroke">{name}</text>')
-    out.append(f'<path d="M{OX + 3 * C} {OY + C} L{OX + 3 * C} {OY - 8}" stroke="#b36b00" stroke-width="1.5"/>')
-    out.append(f'<text x="{OX + 3 * C + 6}" y="{OY - 10}" font-size="11" fill="#b36b00">watermark (0,0)–(5,0)</text>')
+    out.append(f'<path d="M{OX + 3 * C} {OY + 8 * C} L{OX + 3 * C} {OY - 8}" stroke="#b36b00" stroke-width="1.5"/>')
+    out.append(f'<text x="{OX + 3 * C + 6}" y="{OY - 10}" font-size="11" fill="#b36b00">watermark v3 (0,7)–(5,7)</text>')
     fx = OX + 61 * C
     out.append(f'<path d="M{fx} {OY + GRID} L{fx} {OY + GRID + 14}" stroke="#c0282d" stroke-width="1.5"/>')
     out.append(f'<text x="{fx}" y="{OY + GRID + 28}" font-size="11" text-anchor="end" fill="#c0282d">'

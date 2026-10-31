@@ -36,6 +36,7 @@ for y in range(64):
     for x in range(64):
         i = (y * 64 + x) * 4
         if hit[i:i + 4] == base[i:i + 4]: continue
+        if (x, y) in skinhash.RESERVED: fail(f"change at reserved pixel ({x},{y})")
         unused = (x, y) not in masks_base and (x, y) not in masks_over
         if base[i + 3] == 0 and hit[i + 3] == 1 and (x, y) not in masks_base and (unused or not unused_only):
             knobs += 1

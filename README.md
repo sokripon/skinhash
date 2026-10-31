@@ -2,7 +2,9 @@
 
 Finds a "cool looking" Minecraft skin texture id by brute-forcing pixels that are invisible in game.
 
-[How it works](docs/how-it-works.md) · [Optimization log](docs/optimizations.md)
+[How it works](docs/how-it-works.md) · [Optimization log](docs/optimizations.md) · [Browser version](web/README.md) · [Skin areas map](docs/skin-areas.png)
+
+It finds Mojang texture links (`textures.minecraft.net/texture/…`) and NameMC skin pages (`namemc.com/skin/…`), or both on one skin. It runs natively (CPU, CUDA) or in the browser (WebGPU). The example skin is classic Steve, `skins/steve.png`.
 
 The texture id is the SHA-256 of the PNG Mojang serves, with leading zero digits dropped in the URL
 (a zero-padded URL 404s). Mojang re-encodes uploads as signature + IHDR + exactly one IDAT
@@ -93,8 +95,8 @@ The rate is about 3.85e9 candidates/s on an RTX 5060 Ti, up from about 1.2e9. Fo
 
 - **One SHA-256 block per candidate.** `--auto` looks for the largest K <= `--k` and a random value set
   where the variable region, the 9 padding bytes and the 12 constant IEND bytes fit in the last 64-byte
-  block (`V0 + nvar + 12 + 9 <= 64`). For the test skin K=6 never fits: the variable region starts 8-11 bytes
-  into its block and is 40 bytes long. K=5 fits (`V0` 7-9, 34-35 bytes), usually within a few value sets.
+  block (`V0 + nvar + 12 + 9 <= 64`). For the example skin, and the other skins we tried, K=6 did not fit: the variable region starts
+  8-11 bytes into its block and is 40 bytes long. K=5 fits (`V0` 7-9, 34-35 bytes), usually within a few value sets.
   If nothing fits, it falls back to the best 2-block configuration (about 2.1e9/s).
 - **Cached decoding.** Candidate index = `outer * 24 + t`. One thread owns one `outer`. It decodes the first
   m-4 positions of the permutation once (32-bit math, its thread id carry-added to the launch's base digits),
@@ -178,11 +180,11 @@ Mojang texture link of the file. Files are written in Mojang's PNG encoding.
 Knob pixels (3 pixels = 9 RGB bytes, a 64-bit counter):
 
 - Default: overlay or unused pixels that are fully transparent get alpha 1. The latest eligible pixels
-  before the Mojang fast-mode tail are used: (55-57, 63) on the test skin. Base-layer pixels and pixels
+  before the Mojang fast-mode tail are used: (55-57, 63) on the example skin. Base-layer pixels and pixels
   with alpha > 0 are never touched. At 1/255 opacity they should be invisible, but this needs an in-game
   check; it is not verified.
 - `--unused-only`: only pixels no model face samples. Never drawn at all, so certainly invisible. On the
-  test skin they are (61-63, 51), which is 50 SHA blocks per candidate instead of 2.
+  example skin they are (61-63, 51), which is 50 SHA blocks per candidate instead of 2.
 
 Finders: `namemcfinder.c` (CPU, zlib only for writing the hit PNG) and `namemcgpu.cu` (CUDA). Both resume
 SHA-256 from a midstate over the fixed blocks. The GPU must reproduce 96 CPU test vectors before searching
@@ -209,6 +211,23 @@ py skinhash.py search found/me_namemc/<id>.png --gpu -p cafe -n 1
 
 NameMC shows the id as a fixed 16 digits, leading zeros included (checked with `namemc.com/skin/00000000001d91b1`).
 The tool matches prefixes on those 16 digits, so `-z N` gives a NameMC link starting with N zeros.
+
+## Browser version (WebGPU)
+
+`web/` is a static page with the same search: Mojang texture links, NameMC skin pages, or Both in one click
+(NameMC phase, then the Mojang phase on that result). It runs on the visitor's GPU, and nothing is uploaded.
+
+    py web/serve.py            # then open http://127.0.0.1:8000/
+
+- Starts with classic Steve, fetched from textures.minecraft.net and checked against its texture id. Drop
+  your own skin to replace it.
+- Uses pako for the zlib-exact encoding (392 test cases byte-identical to Python's zlib) and WGSL kernels
+  ported from the CUDA finders.
+- Same safety checks: a GPU gate against CPU test vectors before every search, and a CPU check of every hit
+  (ids, and only invisible pixels changed) before it's shown.
+- About 2.9G/s for Mojang links and 2.3G/s for NameMC on an RTX 5060 Ti in Chrome (~75-80% of native).
+
+Details and tests: [web/README.md](web/README.md).
 
 ## Watermark
 

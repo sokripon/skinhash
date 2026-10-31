@@ -29,7 +29,7 @@ invisible variations until one hashes to something you like: a hex word at the s
 
 ### Pixels changed per mode
 
-| Mode | Pixels changed | Coordinates on the test skin |
+| Mode | Pixels changed | Coordinates on the example skin (Steve) |
 |---|---|---|
 | Watermark (every mode) | 6 unused transparent pixels; RGB spells `sokripon skinhash` + version byte `0x03` | (0, 7)–(5, 7), unused corner of the head layout (v2 used (0, 0)–(5, 0), which Mine Little Pony reads) |
 | GPU fast mode (`--gpu`) | the last 5 pixels of the file, as long as they are invisible | (59–63, 63), end of the left sleeve overlay |
@@ -37,7 +37,7 @@ invisible variations until one hashes to something you like: a hex word at the s
 | Generic mode (`--generic`, or when the last pixels are visible) | a 64-bit counter in the RGB of the last 3 invisible pixels found | (61–63, 63) |
 | Generic + `--unused-only` | the same, but only pixels no model face ever samples (also disables fast mode) | (61–63, 51), unused corner next to the left sleeve |
 
-Alpha is never changed, only the RGB under alpha 0.
+The Mojang search never changes alpha, only the RGB under alpha 0. NameMC mode (section 6) sets alpha 0 → 1 on its pixels.
 
 The tool checks each skin instead of assuming. Fast mode runs only if every one of its pixels is a
 transparent overlay pixel or an unused pixel. Otherwise it falls back to generic mode with other invisible
@@ -99,8 +99,8 @@ A kernel that only does SHA-256 reaches about 4.46 G/s, so there's little headro
 including what didn't help, is in the [optimization log](optimizations.md).
 
 **Pixel count.** `fastfinder --dump-job --auto` tries pixel counts from 6 downwards, with up to 400 random
-value sets each, and picks the largest count whose changing bytes fit one SHA block. On the test skin that is
-5, because 6 never fits. If nothing fits, it falls back to the best 2-block configuration, at about 2.1 G/s.
+value sets each, and picks the largest count whose changing bytes fit one SHA block. On the example skin that is
+5; 6 did not fit on the skins we tried. If nothing fits, it falls back to the best 2-block configuration, at about 2.1 G/s.
 
 ### Value-set rollover
 
@@ -168,7 +168,7 @@ under alpha 0 also means the Mojang knob has no effect on it.
 **Knob.** Three pixels get alpha 1 and a varying RGB. A pixel is eligible if it is currently alpha 0 and in
 the overlay layer or unused. Base-layer pixels and pixels that already have alpha > 0 are never changed.
 
-| Mode | Pixels on the test skin | SHA blocks per candidate |
+| Mode | Pixels on the example skin (Steve) | SHA blocks per candidate |
 |---|---|---|
 | default | (55, 56, 57; 63), end of the left sleeve overlay, just before the Mojang tail (58-63, 63) | 2 |
 | `--unused-only` | (61, 62, 63; 51), unused corner, never sampled by the model | 50 |
@@ -198,3 +198,19 @@ hardware allows.
 
 NameMC's URL shows all 16 digits, leading zeros included (checked with `namemc.com/skin/00000000001d91b1`).
 The tool matches on that fixed 16-digit id.
+
+## 7. Browser version
+
+The same search runs in the browser with WebGPU (`web/`, start with `py web/serve.py`):
+
+- **Modes:** Mojang texture link, NameMC skin page, or Both. Both runs the NameMC phase, then the Mojang
+  phase on that result. The phases add up instead of multiplying, because the Mojang search only touches
+  RGB under alpha 0, which NameMC ignores.
+- **Same pipeline:** the job builder, deflate parser and self-test are ported to JavaScript, and pako stands
+  in for zlib (byte-identical in 392 test cases). The kernels are WGSL ports of the CUDA finders.
+- **Same safety checks:** the GPU must reproduce CPU test vectors before every search. Every hit is
+  re-checked on the CPU, both ids and only invisible pixels changed, before it's offered for download.
+- **Speed:** about 75–80% of native in Chrome.
+
+The example result in section 5 was made this way.
+

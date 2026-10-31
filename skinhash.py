@@ -1,21 +1,21 @@
-"""Helper around hashfinder.exe: knob-pixel selection, Mojang re-encoding, verification.
+"""Skin helper: knob-pixel selection, Mojang re-encoding, search wrapper, verification.
 
   py skinhash.py predict SKIN.png              -> texture id Mojang would assign
-  py skinhash.py knobs SKIN.png [--unused-only] -> show which pixels the search may change
+  py skinhash.py knobs SKIN.png [--unused-only] -> pixels the search may change
   py skinhash.py search SKIN.png [finder options...] [--unused-only] [--generic] [--k N] [--out DIR]
-      fast mode (fastfinder.exe, permutes the RGB of the last K pixels) is used when those
-      pixels are all invisible; otherwise (or with --generic) hashfinder.exe is used.
-      -p HEX matches the trimmed id (leading zeros dropped, as in the URL); -z N = N leading zeros.
-      --gpu: dump a job with fastfinder and search on the GPU with gpufinder.exe (CUDA); falls back
-      to the CPU fastfinder if gpufinder is missing or fails its self-check.
-      --fast: require fast mode (CPU or GPU); stop with the reason instead of falling back to the
-      300x slower generic search. (Fast mode needs the last pixels of the skin to be invisible.)
-      --all: keep going until every -p/-s/-z target has a hit (restarts without each found
-      target, so no duplicates pile up; -n is ignored).
+      Fast mode (fastfinder.exe, permutes the RGB of the last K pixels) runs when those pixels
+      are all invisible. Otherwise, or with --generic, hashfinder.exe runs.
+      -p HEX matches the trimmed id (leading zeros dropped, as in the URL). -z N means N leading zeros.
+      --gpu: search on the GPU with gpufinder.exe (CUDA). Falls back to CPU fastfinder if
+      gpufinder is missing or fails its self-check.
+      --fast: require fast mode (CPU or GPU). Stops with the reason instead of falling back to the
+      300x slower generic search.
+      --all: run until every -p/-s/-z target has a hit. Restarts without each found target;
+      -n is ignored.
       Every search adds an invisible watermark (6 transparent unused pixels whose RGB spells
-      "sokripon skinhash" + 02, normally at (0,0)-(5,0)); --no-watermark disables it.
-  py skinhash.py verify BASE.png FOUND.png     -> check FOUND looks identical in game and hashes to its name
-  py skinhash.py detect FILE|ID|URL...         -> was this skin made by skinhash? (IDs/URLs are downloaded)
+      "sokripon skinhash" + 02, normally at (0,0)-(5,0)). --no-watermark turns it off.
+  py skinhash.py verify BASE.png FOUND.png     -> FOUND looks identical in game and hashes to its name
+  py skinhash.py detect FILE|ID|URL...         -> was this skin made by skinhash? (IDs and URLs are downloaded)
 """
 import hashlib
 import os
@@ -30,8 +30,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 W = H = 64
 ROW = 1 + W * 4
 
-# Box-UV parts of the 64x64 player model: (u, v, w, h, d). Arms listed both
-# classic (w=4) and slim (w=3) so a pixel counts as used if either model samples it.
+# Box-UV parts of the 64x64 player model: (u, v, w, h, d). Arms are listed as classic
+# (w=4) and slim (w=3), so a pixel counts as used if either model samples it.
 BASE_PARTS = [
     (0, 0, 8, 8, 8),     # head
     (16, 16, 8, 12, 4),  # body
@@ -50,11 +50,10 @@ OVERLAY_PARTS = [
 ]
 
 
-# Watermark: a run of horizontally adjacent, fully transparent pixels in an unused part
-# of the layout whose RGB bytes, read left to right, spell the payload. Invisible in game
-# and in image viewers; detect with `skinhash.py detect`. Preferred spot starts at (0,0),
-# the unused top-left corner of the head; if that is not free (alpha > 0) the first free
-# unused run in scan order is used, and detection scans the whole image.
+# Watermark: horizontally adjacent, fully transparent, unused pixels whose RGB bytes spell
+# the payload left to right. It starts at (0,0), the unused top-left corner of the head.
+# If that spot has alpha > 0, the first free unused run in scan order is used instead.
+# Detection scans the whole image.
 #   v2 (current): "sokripon skinhash" + 0x02            -> 6 pixels, (0,0)-(5,0)
 #   v1 (old):     "SKHAS" + 0x01                        -> 2 pixels, (0,0)-(1,0)
 WATERMARKS = {2: b"sokripon skinhash\x02", 1: b"SKHAS\x01"}
@@ -117,8 +116,8 @@ def texture_id(png_bytes):
 
 
 def knob_pixels(rgba, unused_only=False):
-    """Pixels whose RGB never shows in game: unused layout pixels, plus overlay
-    pixels that are fully transparent. Latest in the file first (faster search)."""
+    """Pixels whose RGB never shows in game: unused layout pixels and fully transparent
+    overlay pixels. Latest in the file first, which makes the search faster."""
     base, over = masks()
     knobs = []
     for y in range(H):
@@ -143,7 +142,7 @@ def knob_offsets(knobs, nbytes=8):
 
 
 def find_watermark(rgba):
-    """Return (version, (x, y) of first pixel) of any known watermark, or None."""
+    """(version, (x, y) of the first pixel) of a known watermark, or None."""
     for ver, payload in WATERMARKS.items():
         px = wm_pixels(payload)
         n = len(px)
@@ -156,7 +155,7 @@ def find_watermark(rgba):
 
 
 def watermark_spot(rgba, n, avoid=()):
-    """Pick n adjacent unused, fully transparent pixels in one row for the watermark."""
+    """n adjacent unused, fully transparent pixels in one row, or None."""
     base, over = masks()
     def free(x, y):
         return ((x, y) not in base and (x, y) not in over and (x, y) not in avoid
@@ -173,7 +172,7 @@ def watermark_spot(rgba, n, avoid=()):
 
 
 def apply_watermark(rgba, avoid=()):
-    """Write the current watermark in place; returns its pixels, or [] if no room."""
+    """Write the current watermark in place. Returns its pixels, or [] if there is no room."""
     px = wm_pixels(WATERMARKS[WATERMARK_VERSION])
     found = find_watermark(rgba)
     if found and found[0] == WATERMARK_VERSION:
@@ -219,7 +218,7 @@ def cmd_knobs(path, unused_only):
     print(f"{len(k)} invisible pixels available; search uses {used} (bytes {offs})")
 
 
-# Exit codes meaning "stopped by Ctrl+C": Windows STATUS_CONTROL_C_EXIT, POSIX SIGINT.
+# Exit codes for Ctrl+C: Windows STATUS_CONTROL_C_EXIT, POSIX SIGINT.
 INTERRUPT_CODES = {0xC000013A, -2, 130}
 
 
@@ -229,14 +228,14 @@ def stopped(msg="stopped (Ctrl+C)"):
 
 
 STOPPED_BY_US = "stopped-by-wrapper"
-ROLLOVER_RC = 7      # gpufinder: the permutation space of this value set is exhausted
-LAST_ROLLOVER = None  # (cumulative tried, cumulative seconds) from the last "ROLLOVER" line
+ROLLOVER_RC = 7      # gpufinder: this value set is exhausted
+LAST_ROLLOVER = None  # (cumulative tried, cumulative seconds) from the last ROLLOVER line
 
 
 def run_finder(cmd, rgba, on_hit=None):
-    """Run a finder, verifying hits. Ctrl+C ends the whole search (never a fallback).
-    on_hit(why) -> True asks the finder to stop; remaining output is still drained and
-    verified, and STOPPED_BY_US is returned."""
+    """Run a finder and verify its hits. Ctrl+C ends the whole search, never a fallback.
+    If on_hit(why, path) returns True the finder is stopped; the rest of its output is
+    still verified and STOPPED_BY_US is returned."""
     global LAST_ROLLOVER
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, text=True)
     asked_stop = False
@@ -294,7 +293,7 @@ def target_args(targets):
 
 
 def hit_target(why, targets):
-    """Which remaining target does a finder 'why' (e.g. prefix:cafe, zeros:9) satisfy?"""
+    """The remaining target satisfied by a finder 'why' such as prefix:cafe or zeros:9."""
     kind, val = why.split(":", 1)
     for t in targets:
         tk, tv = t.split(":", 1)
@@ -304,7 +303,7 @@ def hit_target(why, targets):
 
 
 def drop_seed(args):
-    """args without -S SEED (a rollover must not rebuild the same value set)."""
+    """args without -S SEED, so a rollover does not rebuild the same value set."""
     out, i = [], 0
     while i < len(args):
         if args[i] == "-S" and i + 1 < len(args):
@@ -316,11 +315,11 @@ def drop_seed(args):
 
 
 def gpu_search(rawp, k, outdir, args, rgba, ext, on_hit=None):
-    """Returns True if the GPU search ran to completion, False if the caller should fall back.
-    The job builder (fastfinder --auto) picks the largest K <= k and a value set whose variable region plus SHA
-    padding fit in one 64-byte block; a single value set only holds m! orderings (15! = 1.3e12 for K=5), so when
-    gpufinder reports it exhausted (exit 7) a fresh job with a new random value set is dumped and the search
-    continues with cumulative tried/time counters."""
+    """True if the GPU search ran to completion, False if the caller should fall back.
+    fastfinder --auto picks the largest K <= k and a value set that fits one SHA block.
+    One value set holds only m! orderings (15! = 1.3e12 for K=5). When gpufinder exits 7
+    (exhausted), a new job with a fresh random value set is dumped and the search goes on
+    with cumulative tried/time counters."""
     global LAST_ROLLOVER
     gpu = os.path.join(HERE, "gpufinder" + ext)
     fast = os.path.join(HERE, "fastfinder" + ext)
@@ -364,7 +363,7 @@ def cmd_search(path, args, unused_only, generic=False, k=6, out=None, gpu=False,
         sys.exit("--fast can't be combined with --generic or --unused-only")
     orig = load_rgba(path)
     rgba = bytearray(orig)
-    tail = {(W - k + i, H - 1) for i in range(k)}  # keep the fast-mode pixels free
+    tail = {(W - k + i, H - 1) for i in range(k)}  # the watermark must not take these
     wm = apply_watermark(rgba, avoid=tail) if watermark else []
     if watermark:
         print(f"watermark at {wm}" if wm else "warning: no free unused pixels for the watermark", flush=True)
@@ -377,7 +376,7 @@ def cmd_search(path, args, unused_only, generic=False, k=6, out=None, gpu=False,
     with open(rawp, "wb") as f:
         f.write(raw_scanlines(rgba))
     print(f"original id {texture_id(mojang_png(orig))}; knob pixels {used}", flush=True)
-    rgba = orig  # hits are verified against the untouched original skin
+    rgba = orig  # hits are verified against the original skin
     ext = ".exe" if os.name == "nt" else ""
     kset = set(kp)
     fast_ok = not generic and all((W - k + i, H - 1) in kset for i in range(k))
@@ -431,7 +430,7 @@ def cmd_search(path, args, unused_only, generic=False, k=6, out=None, gpu=False,
         for t in newly:
             remaining.remove(t)
             found[t] = firsts[t]
-        # keep only the first verified hit per target; drop the rest of that batch
+        # keep the first verified hit per target, drop the rest of the batch
         extra = {f for f in os.listdir(outdir) if f.endswith(".png")} - before - keep
         for f in extra:
             os.remove(os.path.join(outdir, f))

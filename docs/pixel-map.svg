@@ -4134,7 +4134,7 @@
 <text x="573" y="660" font-size="11" text-anchor="end" fill="#c0282d">fast-mode pixels: last 5 (GPU) or 6 (CPU) of row 63</text>
 <rect x="628" y="62" width="16" height="16" rx="3" fill="#8aa2c8" stroke="#888" stroke-width="0.6"/>
 <text x="652" y="75" font-size="13" font-weight="600" fill="#1d1d1f">Base layer</text>
-<text x="652" y="92" font-size="11.5" fill="#555">drawn fully opaque by Minecraft:</text>
+<text x="652" y="92" font-size="11.5" fill="#555">drawn fully opaque:</text>
 <text x="652" y="107" font-size="11.5" fill="#555">never touched</text>
 <rect x="628" y="136" width="16" height="16" rx="3" fill="#c9b6e8" stroke="#888" stroke-width="0.6"/>
 <text x="652" y="149" font-size="13" font-weight="600" fill="#1d1d1f">Overlay layer</text>
@@ -4151,7 +4151,7 @@
 <text x="652" y="356" font-size="13" font-weight="600" fill="#1d1d1f">Fast-mode search pixels</text>
 <text x="652" y="373" font-size="11.5" fill="#555">transparent sleeve overlay:</text>
 <text x="652" y="388" font-size="11.5" fill="#555">RGB permuted, alpha stays 0</text>
-<text x="628" y="427" font-size="11.5" fill="#555">Only pixels that are invisible in</text>
-<text x="628" y="442" font-size="11.5" fill="#555">game ever change; verify</text>
-<text x="628" y="457" font-size="11.5" fill="#555">checks this for every hit.</text>
+<text x="628" y="427" font-size="11.5" fill="#555">Only pixels invisible in game</text>
+<text x="628" y="442" font-size="11.5" fill="#555">ever change. verify checks</text>
+<text x="628" y="457" font-size="11.5" fill="#555">every hit.</text>
 </svg>

@@ -48,7 +48,6 @@ def main():
             kind = ("fast" if p in fast else "watermark" if p in wm else
                     "base" if p in base else "overlay" if p in over else "unused")
             out.append(f'<rect x="{OX + x * C}" y="{OY + y * C}" width="{C}" height="{C}" fill="{COL[kind]}"/>')
-    # grid lines every 8 px
     for i in range(0, 65, 8):
         out.append(f'<line x1="{OX + i * C}" y1="{OY}" x2="{OX + i * C}" y2="{OY + GRID}" stroke="#ffffff" stroke-width="1"/>')
         out.append(f'<line x1="{OX}" y1="{OY + i * C}" x2="{OX + GRID}" y2="{OY + i * C}" stroke="#ffffff" stroke-width="1"/>')
@@ -57,17 +56,15 @@ def main():
         cx, cy = OX + (x + w / 2) * C, OY + (y + h / 2) * C + 4
         out.append(f'<text x="{cx}" y="{cy}" font-size="11" text-anchor="middle" fill="#1d1d1f" '
                    f'stroke="#ffffff" stroke-width="3" paint-order="stroke">{name}</text>')
-    # callouts
     out.append(f'<path d="M{OX + 3 * C} {OY + C} L{OX + 3 * C} {OY - 8}" stroke="#b36b00" stroke-width="1.5"/>')
     out.append(f'<text x="{OX + 3 * C + 6}" y="{OY - 10}" font-size="11" fill="#b36b00">watermark (0,0)–(5,0)</text>')
     fx = OX + 61 * C
     out.append(f'<path d="M{fx} {OY + GRID} L{fx} {OY + GRID + 14}" stroke="#c0282d" stroke-width="1.5"/>')
     out.append(f'<text x="{fx}" y="{OY + GRID + 28}" font-size="11" text-anchor="end" fill="#c0282d">'
                'fast-mode pixels: last 5 (GPU) or 6 (CPU) of row 63</text>')
-    # legend
     lx, ly = OX + GRID + 28, OY + 6
     legend = [
-        ("base", "Base layer", ["drawn fully opaque by Minecraft:", "never touched"]),
+        ("base", "Base layer", ["drawn fully opaque:", "never touched"]),
         ("overlay", "Overlay layer", ["drawn with transparency: alpha-0", "pixels here show nothing"]),
         ("unused", "Unused", ["no model face samples it"]),
         ("watermark", "Watermark", ['RGB spells "sokripon skinhash"', "+ version byte, alpha 0"]),
@@ -79,9 +76,9 @@ def main():
         for i, t in enumerate(lines):
             out.append(f'<text x="{lx + 24}" y="{ly + 30 + i * 15}" font-size="11.5" fill="#555">{t}</text>')
         ly += 34 + 15 * len(lines) + 10
-    out.append(f'<text x="{lx}" y="{ly + 10}" font-size="11.5" fill="#555">Only pixels that are invisible in</text>')
-    out.append(f'<text x="{lx}" y="{ly + 25}" font-size="11.5" fill="#555">game ever change; verify</text>')
-    out.append(f'<text x="{lx}" y="{ly + 40}" font-size="11.5" fill="#555">checks this for every hit.</text>')
+    out.append(f'<text x="{lx}" y="{ly + 10}" font-size="11.5" fill="#555">Only pixels invisible in game</text>')
+    out.append(f'<text x="{lx}" y="{ly + 25}" font-size="11.5" fill="#555">ever change. verify checks</text>')
+    out.append(f'<text x="{lx}" y="{ly + 40}" font-size="11.5" fill="#555">every hit.</text>')
     out.append("</svg>")
     path = os.path.join(HERE, "pixel-map.svg")
     with open(path, "w", encoding="utf-8") as f:

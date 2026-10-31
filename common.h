@@ -1,4 +1,4 @@
-/* shared by hashfinder.c and fastfinder.c: includes, SHA-256 (generic + SHA-NI), arena, patterns */
+/* Shared by hashfinder.c and fastfinder.c: SHA-256 (generic and SHA-NI), arena, patterns. */
 #pragma once
 #include <stdint.h>
 #include <stdio.h>
@@ -26,7 +26,7 @@
 #define MAX_OFFS 64
 #define MAX_PAT 64
 
-/* ---------------- SHA-256 ---------------- */
+/* SHA-256 */
 static const uint32_t K256[64] = {
     0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,
     0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,
@@ -60,7 +60,7 @@ static void sha256_block_generic(uint32_t s[8], const uint8_t *p, size_t nblocks
 }
 
 #ifdef HAVE_X86
-/* SHA-NI block function (public-domain pattern by Intel / J. Walton). */
+/* SHA-NI block function, after the public-domain Intel / J. Walton pattern. */
 __attribute__((target("sha,sse4.1")))
 static void sha256_block_shani(uint32_t s[8], const uint8_t *p, size_t nblocks) {
     const __m128i MASK = _mm_set_epi64x(0x0c0d0e0f08090a0bULL, 0x0405060700010203ULL);
@@ -88,7 +88,6 @@ static void sha256_block_shani(uint32_t s[8], const uint8_t *p, size_t nblocks) 
             long long k1 = (long long)((uint64_t)K256[4*r+3] << 32 | K256[4*r+2]);
             RND2(Mi, k0, k1);
             if (r < 12) {
-                /* schedule next message words: W[r+4] from W[r..r+3] */
                 __m128i a = Ms[r & 3], b = Ms[(r+1) & 3], c = Ms[(r+2) & 3], d = Ms[(r+3) & 3];
                 __m128i t = _mm_sha256msg1_epu32(a, b);
                 t = _mm_add_epi32(t, _mm_alignr_epi8(d, c, 4));
@@ -128,7 +127,7 @@ static void sha256(const uint8_t *msg, size_t len, uint8_t out[32]) {
     }
 }
 
-/* ---------------- arena allocator for deflateCopy ---------------- */
+/* Bump allocator for deflateCopy; the caller resets `used` to free everything. */
 typedef struct { uint8_t *base; size_t cap, used; } arena_t;
 __attribute__((unused)) static voidpf arena_alloc(voidpf op, uInt items, uInt size) {
     arena_t *a = op;
@@ -140,7 +139,7 @@ __attribute__((unused)) static voidpf arena_alloc(voidpf op, uInt items, uInt si
 }
 __attribute__((unused)) static void arena_free(voidpf op, voidpf p) { (void)op; (void)p; }
 
-/* ---------------- patterns ---------------- */
+/* Patterns */
 typedef struct { uint64_t val, mask; int suffix; char text[17]; } pat_t;
 static pat_t pats[MAX_PAT];
 static int npats = 0;
@@ -148,7 +147,7 @@ static int npats = 0;
 static int parse_pat(const char *hex, int suffix) {
     size_t n = strlen(hex);
     if (n == 0 || n > 16 || npats >= MAX_PAT) return -1;
-    if (!suffix && hex[0] == '0') return -1;   /* prefixes apply to the TRIMMED id (no leading zeros) */
+    if (!suffix && hex[0] == '0') return -1;   /* prefixes match the trimmed id, which never starts with 0 */
     pat_t *p = &pats[npats];
     p->val = 0; p->mask = 0; p->suffix = suffix;
     for (size_t i = 0; i < n; i++) {
@@ -167,8 +166,8 @@ static int parse_pat(const char *hex, int suffix) {
 }
 
 
-/* top 64 bits of the id with leading zero nibbles dropped (as in the texture URL).
- * hi/mid = first 16 digest bytes as two big-endian 64-bit words. */
+/* Top 64 bits of the id with leading zero nibbles dropped, as in the texture URL.
+ * hi/mid are the first 16 digest bytes as two big-endian 64-bit words. */
 static inline uint64_t trimmed_top64(uint64_t hi, uint64_t mid) {
     if (hi) {
         int sh = __builtin_clzll(hi) & ~3;

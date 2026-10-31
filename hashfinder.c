@@ -1,15 +1,14 @@
 /*
- * hashfinder: brute-force Minecraft skin texture ids.
+ * hashfinder: generic search for Minecraft skin texture ids.
  *
- * Mojang re-encodes an uploaded skin as:
- *   PNG signature + IHDR(64x64, 8-bit RGBA) + one IDAT (zlib level 4, wbits 15,
- *   memLevel 8, default strategy, every scanline filter 0) + IEND
- * and the texture id is SHA-256 of that file (leading zeros dropped in the URL).
+ * Mojang stores a skin as signature + IHDR(64x64, 8-bit RGBA) + one IDAT (zlib level 4,
+ * wbits 15, memLevel 8, default strategy, filter 0 on every row) + IEND. The texture id
+ * is the SHA-256 of that file, leading zeros dropped in the URL.
  *
- * We vary the RGB of a few "knob" pixels (chosen by skinhash.py so they are never
- * rendered) and hash each candidate. The knob pixels sit as late in the image as
- * possible: the deflate state after the unchanged prefix is computed once
- * and cloned with deflateCopy(), so each candidate only re-runs LZ77 on the tail.
+ * A counter goes into the RGB of "knob" pixels that skinhash.py picked because they are
+ * never rendered. They sit as late in the image as possible. The deflate state after the
+ * unchanged prefix is built once and cloned with deflateCopy(), so a candidate only
+ * compresses the tail.
  *
  * usage: hashfinder <raw.bin> <offsets> <outdir> [options]
  *   raw.bin   64*(1+256) bytes of filtered scanlines (filter byte 0 per row)
@@ -17,7 +16,7 @@
  *             (at least 8; the 64-bit counter goes into the first 8)
  * options:
  *   -p HEX    match if the trimmed id (leading zeros dropped) starts with HEX (not 0...)
- *   -s HEX    match if sha256 hex ends with HEX     (repeatable, <=16 chars)
+ *   -s HEX    match if the sha256 hex ends with HEX (repeatable, <=16 chars)
  *   -z N      also save any hash with >= N leading zero nibbles
  *   -t N      threads (default: all logical CPUs)
  *   -S SEED   64-bit start counter (default: random)
@@ -27,7 +26,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include "common.h"
 
-/* ---------------- shared state ---------------- */
+/* shared state */
 static uint8_t g_raw[RAW_LEN];
 static int g_offs[MAX_OFFS], g_noffs;
 static int g_split;            /* first modified byte; prefix [0, split) is fixed */
@@ -82,7 +81,7 @@ static void report(const uint8_t *file, size_t flen, const uint8_t d[32], uint64
     pthread_mutex_unlock(&g_io);
 }
 
-/* deflate the fixed prefix once; returns compressed bytes produced so far */
+/* Deflate the fixed prefix once. Returns the compressed bytes produced so far. */
 static int prepare_base(z_stream *base, arena_t *copy_arena, uint8_t *zout, size_t zcap) {
     memset(base, 0, sizeof *base);
     if (deflateInit2(base, 4, Z_DEFLATED, 15, 8, Z_DEFAULT_STRATEGY) != Z_OK) return -1;
@@ -91,7 +90,7 @@ static int prepare_base(z_stream *base, arena_t *copy_arena, uint8_t *zout, size
     base->next_out = zout;
     base->avail_out = (uInt)zcap;
     if (deflate(base, Z_NO_FLUSH) != Z_OK || base->avail_in != 0) return -1;
-    /* clones are carved from the per-thread arena, freed by resetting it */
+    /* deflateCopy allocates from the per-thread arena; resetting it frees the clone. */
     base->zalloc = arena_alloc;
     base->zfree = arena_free;
     base->opaque = copy_arena;
@@ -129,7 +128,6 @@ static void *worker(void *arg) {
         z.avail_out = (uInt)(zcap - pre);
         if (deflate(&z, Z_FINISH) != Z_STREAM_END) { fprintf(stderr, "deflate failed\n"); exit(2); }
         size_t zlen = pre + (zcap - pre - z.avail_out);
-        /* no deflateEnd needed: arena is reset next round */
 
         uint8_t *p = file + hdr;
         p[0] = zlen >> 24; p[1] = zlen >> 16; p[2] = zlen >> 8; p[3] = zlen;
@@ -232,7 +230,7 @@ int main(int argc, char **argv) {
     unsigned a, b, c, d;
     if (__get_cpuid_count(7, 0, &a, &b, &c, &d) && (b & (1u << 29))) sha256_block = sha256_block_shani;
 #endif
-    /* self-test SHA-256 ("abc") */
+    /* SHA-256 self-test on "abc" */
     uint8_t dg[32]; char hx[65];
     sha256((const uint8_t *)"abc", 3, dg); hexify(dg, hx);
     if (strcmp(hx, "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")) {

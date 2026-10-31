@@ -1,18 +1,17 @@
 /*
- * fastfinder: permutation-based fast search for Minecraft skin texture ids.
+ * fastfinder: permutation-based search for Minecraft skin texture ids.
  *
- * The last K pixels of the image (row 63, all knob-eligible, alpha 0) get 3K
- * distinct byte values that occur nowhere else in the raw scanlines. Every
- * candidate is a permutation of that value set. Consequently:
- *   - the tail of the data is all literals (every 3-byte window has a unique byte),
- *   - the literal frequency multiset is the same for each permutation, so zlib's
- *     Huffman trees / block header / total bit length are identical,
- *   - only the tail literal bits, Adler-32 and the IDAT CRC change.
- * Per candidate we emit the tail codes, Adler, CRC and resume SHA-256 from a
- * midstate over the fixed whole 64-byte blocks of the file.
+ * The last K pixels (row 63, alpha 0) get 3K distinct byte values that occur nowhere
+ * else in the raw scanlines. Every candidate is a permutation of that value set, so:
+ *   - the tail is all literals (every 3-byte window holds a unique byte),
+ *   - the literal frequencies are the same, so zlib's Huffman trees, block header and
+ *     total bit length do not change,
+ *   - only the tail literal bits, Adler-32 and the IDAT CRC differ.
+ * A candidate emits those, then finishes SHA-256 from a midstate over the fixed whole
+ * 64-byte blocks of the file.
  *
  * usage: fastfinder <raw.bin> <K> <outdir> [-p HEX]... [-s HEX]... [-z N] [-t N] [-S SEED] [-n N] [-b]
- * exit code 4: structural assumption failed (caller should fall back to hashfinder)
+ * exit code 4: a structural assumption failed; the caller falls back to hashfinder
  */
 #define _POSIX_C_SOURCE 200809L
 #include "common.h"
@@ -36,7 +35,7 @@ static atomic_int g_best_zeros;
 static atomic_int g_stop;
 static int g_nosave;           /* benchmark mode: never write files */
 static const char *g_dump;     /* --dump-job FILE: write the GPU job and exit */
-static int g_auto;             /* --auto: with --dump-job, search K <= given K and value sets for nblk == 1 */
+static int g_auto;             /* --auto: with --dump-job, look for K <= given K and a value set with nblk == 1 */
 static pthread_mutex_t g_io = PTHREAD_MUTEX_INITIALIZER;
 
 static const uint8_t PNG_SIG[8] = {0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n'};
@@ -74,7 +73,7 @@ static void shuffle(uint8_t *a, int n, uint64_t *s) {
     }
 }
 
-/* ---------------- reference encoder (exactly what Mojang/Python do) ---------------- */
+/* reference encoder: same settings as Mojang */
 static size_t build_header(uint8_t *f) {
     memcpy(f, PNG_SIG, 8);
     uint8_t ihdr[17] = {'I','H','D','R', 0,0,0,W, 0,0,0,H, 8, 6, 0, 0, 0};
@@ -109,7 +108,7 @@ static size_t real_png(const uint8_t *raw, uint8_t *file) {
     return (size_t)(p + 16 - file);
 }
 
-/* ---------------- tiny deflate parser (puff style) ---------------- */
+/* small deflate parser, puff style */
 typedef struct { const uint8_t *in; size_t len; size_t pos; } bs_t;   /* pos in bits */
 typedef struct { short count[16]; short symbol[320]; } huff_t;
 
@@ -234,7 +233,7 @@ static void parse_deflate(const uint8_t *z, size_t len, const uint8_t *raw, int 
     if (((P->E_bits + 7) >> 3) + 4 != len) UNSUPPORTED("trailing data after the block");
 }
 
-/* ---------------- fast path ---------------- */
+/* fast path */
 typedef struct {
     uint32_t tab[257];          /* reversed code | len << 16 */
     uint8_t alpha[MAXK];
@@ -277,7 +276,7 @@ static void set_raw(uint8_t *raw, const uint8_t *perm) {
     for (int i = 0; i < g_n; i++) raw[g_knob[i]] = perm[i];
 }
 
-/* assemble the file from the prefix + buf, compare against real zlib */
+/* Build the file from prefix + buf and compare it with real zlib. */
 static void check_candidate(const uint8_t *perm, const uint8_t *buf, const char *what) {
     static __thread uint8_t raw[RAW_LEN], f1[FILE_CAP], f2[FILE_CAP];
     memcpy(raw, g_raw, RAW_LEN);
@@ -347,7 +346,7 @@ static void setup_fast(uint64_t *rng) {
     uint64_t a = 1, b = 0;
     for (int i = 0; i < g_split; i++) { a += raw[i]; b += a; }
     F.adl_a = a % 65521; F.adl_b = b % 65521;
-    /* adler lives in the last 4 zdata bytes: sanity check against the reference */
+    /* Adler-32 is the last 4 zdata bytes; check it against the reference. */
     uint64_t a2 = F.adl_a, b2 = F.adl_b;
     for (int i = g_split; i < RAW_LEN; i++) { a2 += raw[i]; b2 += a2; }
     a2 %= 65521; b2 %= 65521;
@@ -372,7 +371,7 @@ static void setup_fast(uint64_t *rng) {
 }
 
 
-/* (re)configure the knob layout for K pixels (the last K pixels of row 63) */
+/* Set the knob layout to the last K pixels of row 63. */
 static void configure_k(int K) {
     g_K = K; g_n = 3 * K;
     for (int i = 0; i < g_K; i++) {
@@ -383,9 +382,10 @@ static void configure_k(int K) {
     g_split = g_knob[0];
 }
 
-/* --auto: look for a (K, value set) whose variable region plus SHA padding fit in ONE 64-byte block
- * (nblk == 1 halves the GPU work). Largest K <= kmax first, several random value sets per K; falls back
- * to the best multi-block configuration of the largest K that works at all. */
+/* --auto: find a (K, value set) whose variable region plus SHA padding fit in one 64-byte
+ * block, which halves the GPU work. Tries the largest K <= kmax first, several random value
+ * sets per K. Otherwise falls back to the best multi-block configuration of the largest K
+ * that works at all. */
 #define AUTO_TRIES 400
 static int try_setup(uint64_t *rng) {
     int ok = 0;
@@ -411,7 +411,7 @@ static void auto_choose(uint64_t *rng) {
             if (fb_k < 0 || (K == fb_k && (int)F.nblk < fb_n)) { fb_k = K; fb_n = (int)F.nblk; fb_rng = saved; }
         }
         fprintf(stderr, "auto: K=%d: no single-block value set in %d tries (%d usable)\n", K, AUTO_TRIES, ok_cnt);
-        if (fb_k >= 0 && K <= fb_k - 2) break;   /* do not wander far below the first usable K */
+        if (fb_k >= 0 && K <= fb_k - 2) break;   /* stay near the first usable K */
     }
     if (fb_k < 0) UNSUPPORTED("no usable K / value set found in auto mode");
     configure_k(fb_k);
@@ -429,7 +429,7 @@ static void self_test(uint64_t *rng) {
         shuffle(perm, g_n, rng);
         build_buf(perm, buf);
         check_candidate(perm, buf, "self-test");
-        /* SHA midstate path must equal full SHA-256 of the real file */
+        /* The midstate path must equal a full SHA-256 of the real file. */
         uint32_t s[8];
         memcpy(s, F.mid, sizeof s);
         sha256_block(s, buf, F.nblk);
@@ -445,7 +445,7 @@ static void self_test(uint64_t *rng) {
     fprintf(stderr, "self-test: 1000 random permutations identical to real zlib output\n");
 }
 
-/* ---------------- GPU job dump ---------------- */
+/* GPU job dump */
 /* Index -> permutation mapping shared with gpufinder. m = min(n,20) values are permuted (values m..n-1 stay).
  * idx = outer * R! + t, with R = inner_r() (=GPU_R) and t < R!.
  *  - outer: Lehmer code over the first m-R positions: digit i (least significant first) has radix m-i and
@@ -504,7 +504,7 @@ static void dump_job(const char *path, uint64_t *rng) {
         w64(f, pats[i].val); w64(f, pats[i].mask); w32(f, (uint32_t)pats[i].suffix);
         char t[20] = {0}; memcpy(t, pats[i].text, strlen(pats[i].text)); fwrite(t, 1, 20, f);
     }
-    /* test vectors: index, expected sha256 of the whole PNG computed on the CPU */
+    /* test vectors: index and the CPU-computed SHA-256 of the whole PNG */
     uint64_t mf = perm_count();
     enum { NT = 16 };
     w32(f, NT);
@@ -527,7 +527,7 @@ static void dump_job(const char *path, uint64_t *rng) {
     fprintf(stderr, "job written to %s (K=%d, nblk=%zu, m=%d, %llu permutations per value set)\n", path, g_K, F.nblk, perm_m(), (unsigned long long)mf);
 }
 
-/* ---------------- search ---------------- */
+/* search */
 static void report(const uint8_t *file, size_t flen, const uint8_t d[32], uint64_t ctr, const char *why) {
     char hex[65];
     hexify(d, hex);

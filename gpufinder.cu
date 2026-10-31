@@ -1,27 +1,27 @@
 /*
  * gpufinder: CUDA backend of fastfinder.
  *
- * Reads a job file written by `fastfinder RAW K OUTDIR ... --dump-job job.bin [--auto]`, which holds the
- * constant PNG prefix, the SHA-256 midstate, the Huffman code of each byte value, Adler/CRC prefix state,
- * the patterns and CPU-computed test vectors.
+ * Reads a job file from `fastfinder RAW K OUTDIR ... --dump-job job.bin [--auto]`: constant PNG prefix,
+ * SHA-256 midstate, Huffman code per byte value, Adler/CRC prefix state, patterns and CPU-computed
+ * test vectors.
  *
- * Search structure (see fastfinder.c "GPU job dump" for the index <-> permutation mapping):
+ * Index <-> permutation mapping: see "GPU job dump" in fastfinder.c.
  *   candidate index = outer * R! + t     (R = 4, t < 24)
- *   - one GPU thread owns one `outer` value: it decodes the first m-R permutation positions once (32-bit math,
- *     carry-adding its thread id onto the launch base digits), emits their Huffman codes into a word image,
- *     and keeps bit-accumulator / CRC-32 / Adler state;
- *   - then it loops over the 24 orderings of the last R positions, re-emitting only those R codes;
- *     the tail (fixed codes, EOB, Adler-a, template) is a precomputed constant image because the total bit
- *     length of every permutation is the same;
- *   - CRC-32 is advanced word by word as 32-bit words complete, the Adler-b sum is linear in the values;
+ *   - A thread owns one `outer`. It decodes the first m-R positions once (32-bit math, thread id
+ *     carry-added onto the launch base digits), emits their Huffman codes into a word image and keeps the
+ *     bit accumulator, CRC-32 and Adler state.
+ *   - It then loops over the 24 orderings of the last R positions and re-emits only those R codes.
+ *     Every permutation has the same total bit length, so the tail (fixed codes, EOB, Adler-a, template)
+ *     is one precomputed constant image.
+ *   - CRC-32 advances a 32-bit word at a time. The Adler-b sum is linear in the values.
  *   - SHA-256 resumes from the midstate (1 block when the job says nblk == 1).
  *
  * usage: gpufinder job.bin OUTDIR [-p HEX]... [-s HEX]... [-z N] [-S SEED] [-n N] [-b]
  *                  [--tried-offset N] [--time-offset S] [--bench-secs S]
  *   -p/-s/-z given here replace those stored in the job.
  * exit codes: 0 ok, 1 usage/job error, 5 correctness gate failed, 6 CUDA error / no device,
- *             7 permutation space of this value set exhausted (prints "ROLLOVER tried=.. secs=.." on stdout;
- *               the caller should dump a new job and continue with --tried-offset/--time-offset)
+ *             7 permutation space of this value set exhausted. Prints "ROLLOVER tried=.. secs=.." on
+ *               stdout; the caller dumps a new job and continues with --tried-offset/--time-offset.
  */
 #include <cstdio>
 #include <cstdlib>
@@ -54,7 +54,7 @@ typedef unsigned long long u64;
 typedef uint32_t u32;
 typedef uint8_t u8;
 
-/* ------------------------------------------------------------------ job */
+/* job */
 struct Pat { u64 val, mask; u32 suffix; char text[24]; };
 struct TestVec { u64 idx; u8 sha[32]; };
 struct Job {
@@ -101,7 +101,7 @@ static bool load_job(const char *path, Job &J) {
 static bool parse_pat(const char *hex, int suffix, Pat &p) {
     size_t n = strlen(hex);
     if (n == 0 || n > 16) return false;
-    if (!suffix && hex[0] == '0') return false;   /* prefixes apply to the TRIMMED id */
+    if (!suffix && hex[0] == '0') return false;   /* prefixes match the trimmed id */
     memset(&p, 0, sizeof p);
     p.suffix = suffix;
     for (size_t i = 0; i < n; i++) {
@@ -117,7 +117,7 @@ static bool parse_pat(const char *hex, int suffix, Pat &p) {
     return true;
 }
 
-/* ------------------------------------------------------------------ device */
+/* device */
 struct DevParams {
     u32 m, nblk, W0w, nb0, acc0, crc_w0, nwL, nbL, KW, boff, Lc, b_const;
     u32 zeros, npats, has_suffix, c0;
@@ -155,7 +155,7 @@ __device__ u64 d_hits[MAXHITS];
 __device__ __forceinline__ u32 ror(u32 x, int n) { return __funnelshift_r(x, x, n); }
 __device__ __forceinline__ u32 bswap(u32 x) { return __byte_perm(x, 0, 0x0123); }
 
-/* one SHA-256 block over big-endian words w[0..15] */
+/* One SHA-256 block over big-endian words w[0..15]. */
 __device__ __forceinline__ void sha_block(u32 st[8], const u32 *img) {
     u32 w[64];
 #pragma unroll
@@ -176,7 +176,7 @@ __device__ __forceinline__ void sha_block(u32 st[8], const u32 *img) {
     st[0] += a; st[1] += b; st[2] += c; st[3] += d; st[4] += e; st[5] += f; st[6] += g; st[7] += h;
 }
 
-/* CRC-32 register update with one little-endian 32-bit word (4 bytes) */
+/* CRC-32 update with one little-endian 32-bit word. */
 #define CRCW(c, w)                                                              \
     do {                                                                        \
         (c) ^= (w);                                                             \
@@ -186,7 +186,7 @@ __device__ __forceinline__ void sha_block(u32 st[8], const u32 *img) {
         (c) = s_crc[(c) & 255] ^ ((c) >> 8);                                    \
     } while (0)
 
-/* append a code of clen bits; flush a 32-bit word into the SHA image when complete */
+/* Append a clen-bit code; flush a 32-bit word into the SHA image when it completes. */
 #define EMIT(acc, nb, nw, crc, comb, clen)                                      \
     do {                                                                        \
         (acc) |= (u64)(comb) << (nb); (nb) += (clen);                           \
@@ -226,7 +226,7 @@ __device__ __forceinline__ void run_outer(const BaseDigits &bd, u32 gid, u32 tlo
         EMIT(acc, nb, nw, crc, comb, clen);
     }
 
-    /* the RIN remaining values (ascending index) and their per-position code / weight table */
+    /* the RIN remaining values (ascending index) with per-position code and weight tables */
     uint4 E[RIN * RIN];
     {
         const u32 freem = ~used & ((1u << m) - 1u);
@@ -253,7 +253,7 @@ __device__ __forceinline__ void run_outer(const BaseDigits &bd, u32 gid, u32 tlo
             b2 += e.z;
             EMIT(a2, nb2, nw2, crc2, e.x, e.y);
         }
-        /* nb2 == nbL and nw2 == nwL by construction (same multiset of codes for every ordering) */
+        /* nb2 == nbL and nw2 == nwL: every ordering has the same multiset of codes */
         const u32 nwL = c_p.nwL, KW = c_p.KW;
         u32 vv[MAXKW];
 #pragma unroll
@@ -272,7 +272,7 @@ __device__ __forceinline__ void run_outer(const BaseDigits &bd, u32 gid, u32 tlo
                 vv[k] |= ((u32)k == kb ? (u32)x : 0u) | ((u32)k == kb + 1 ? (u32)(x >> 32) : 0u);
             }
         }
-        /* CRC-32 of the post-permutation bytes is affine in (running state ^ pending bits) and in the two b bytes */
+        /* CRC-32 of the post-permutation bytes is affine in (running state ^ pending bits) and the two b bytes */
         u32 x = crc2 ^ (u32)a2;
         u32 c = s_gt[x & 255] ^ s_gt[256 + ((x >> 8) & 255)] ^ s_gt[512 + ((x >> 16) & 255)] ^ s_gt[768 + (x >> 24)] ^ c_p.c0 ^
                 s_gt[1024 + (b >> 8)] ^ s_gt[1280 + (b & 255)];
@@ -353,7 +353,7 @@ __global__ void test_kernel(const BaseDigits *bds, const u32 *gids, const u32 *t
     }
 }
 
-/* ------------------------------------------------------------------ host CPU reference (independent of the kernel) */
+/* host CPU reference, independent of the kernel */
 static const u32 K256h[64] = {
     0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,
     0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,
@@ -405,7 +405,7 @@ static void init_crc_h() {
 
 static u64 fact_h(int r) { u64 f = 1; for (int i = 2; i <= r; i++) f *= (u64)i; return f; }
 
-/* index -> permutation of the n values (same mapping as fastfinder decode_perm; written independently) */
+/* index -> permutation of the n values; same mapping as fastfinder decode_perm, written independently */
 static std::vector<u8> host_perm(const Job &J, u64 idx) {
     u32 m = J.m, R = J.R;
     u64 RF = fact_h((int)R), o = idx / RF, t = idx % RF;
@@ -429,7 +429,7 @@ static std::vector<u8> host_perm(const Job &J, u64 idx) {
     return perm;
 }
 
-/* build the file from the permutation index: ref prefix + tail region (byte-oriented, as fastfinder does) */
+/* Build the file from the permutation index: ref prefix + tail region, byte-oriented as in fastfinder. */
 static std::vector<u8> host_file(const Job &J, u64 idx) {
     std::vector<u8> perm = host_perm(J, idx);
     std::vector<u8> buf(J.tmpl);
@@ -492,7 +492,7 @@ static u64 splitmix(u64 &s) {
     return z ^ (z >> 31);
 }
 
-/* ------------------------------------------------------------------ job -> device constants */
+/* job -> device constants */
 struct DevData {
     DevParams P;
     u32 tmpl[MAXBLK * 16], post[MAXKW], tab[64], val[64], wt[64], ac[64], al[64];
@@ -506,7 +506,7 @@ static bool derive(const Job &J, DevData &D) {
     if (J.R != RIN || m < RIN + 1 || m > 31) { fprintf(stderr, "gpufinder: unsupported job (R=%u m=%u)\n", J.R, m); return false; }
     DevParams &P = D.P;
     P.m = m; P.nblk = J.nblk;
-    /* stream start: word aligned, the bytes before V0 inside the word are part of the initial accumulator */
+    /* stream start is word aligned; the bytes before V0 in that word seed the accumulator */
     u32 W0 = J.V0 & ~3u, s0 = J.V0 - W0;
     P.W0w = W0 / 4;
     u32 acc0 = 0;
@@ -622,7 +622,6 @@ int main(int argc, char **argv) {
     if (cudaGetDeviceCount(&ndev) != cudaSuccess || ndev < 1) { fprintf(stderr, "gpufinder: no CUDA device\n"); return 6; }
     cudaDeviceProp prop; CK(cudaGetDeviceProperties(&prop, 0));
 
-    /* upload job */
     static DevData D;
     if (!derive(J, D)) return 1;
     u32 crc_tab[256];
@@ -662,7 +661,7 @@ int main(int argc, char **argv) {
             u64 idx = J.tests[i].idx;
             if (idx >= mfact) { fprintf(stderr, "gpufinder: GATE FAILED: test index out of range\n"); return 5; }
             u64 o = idx / RF;
-            /* exercise the carry-add of the thread id: start from a base below `o` */
+            /* exercise the thread-id carry-add: start from a base below `o` */
             u64 g = std::min<u64>(o, 100000ull + 7 * (u64)i);
             gids[i] = (u32)g; ts[i] = (u32)(idx % RF);
             digits_of(o - g, bds[i]);
@@ -683,7 +682,7 @@ int main(int argc, char **argv) {
             u8 d[32];
             for (int k = 0; k < 8; k++) { d[4*k] = out[i*8+k] >> 24; d[4*k+1] = out[i*8+k] >> 16; d[4*k+2] = out[i*8+k] >> 8; d[4*k+3] = out[i*8+k]; }
             if (memcmp(d, J.tests[i].sha, 32)) bad++;
-            /* also cross-check the host reference builder against the CPU expectation */
+            /* cross-check the host reference builder against the CPU expectation too */
             std::vector<u8> file = host_file(J, J.tests[i].idx);
             u8 hd[32]; sha256_h(file.data(), file.size(), hd);
             if (memcmp(hd, J.tests[i].sha, 32)) { fprintf(stderr, "gpufinder: GATE FAILED: host reference disagrees with job test vector %d\n", i); return 5; }
@@ -716,7 +715,7 @@ int main(int argc, char **argv) {
         covered += cnt;
         obase += cnt; if (obase >= NOUT) obase = 0;
         double te = now_s();
-        /* aim for ~60 ms per launch */
+        /* ~60 ms per launch */
         if (te - ts < 0.03 && batch < (1ull << 27)) batch *= 2;
         else if (te - ts > 0.12 && batch > 4096) batch /= 2;
 

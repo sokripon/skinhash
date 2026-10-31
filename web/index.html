@@ -4,33 +4,31 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>skinhash in the browser</title>
-<meta name="description" content="Find invisible variations of your own Minecraft skin whose texture id looks cool. Runs locally on your GPU with WebGPU.">
+<meta name="description" content="Find invisible variations of your own Minecraft skin whose texture link looks cool. Runs locally on your GPU with WebGPU.">
 <link rel="icon" href="data:,">
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
 <main>
   <h1>skinhash <span class="sub">in the browser</span></h1>
-  <p class="lead">Finds invisible variations of <em>your own</em> Minecraft skin whose texture link looks cool
-  (<code>c0ffee&hellip;</code>, many leading zeros). Everything runs locally on your GPU. Nothing is uploaded.</p>
+  <p class="lead">Finds invisible variations of <em>your own</em> Minecraft skin whose Mojang texture link or NameMC page id looks cool, like <code>c0ffee&hellip;</code> or many leading zeros. Runs on your GPU. Nothing is uploaded.</p>
 
   <div id="nogpu" class="box warn" hidden>
     <strong>WebGPU is not available in this browser.</strong>
-    This tool needs WebGPU: recent desktop Chrome or Edge (113+), Chrome on Android (121+), Safari 26+ or Firefox 141+ (Windows).
-    Support also depends on your OS and GPU driver; check <code>chrome://gpu</code> or try another browser.
+    Use recent desktop Chrome or Edge (113+), Chrome on Android (121+), Safari 26+ or Firefox 141+ (Windows). It also depends on your OS and GPU driver; check <code>chrome://gpu</code> or try another browser.
   </div>
 
   <section>
     <h2>1. Your skin</h2>
     <label id="drop" class="drop" for="file">
       <input id="file" type="file" accept="image/png">
-      <span>Drop a 64&times;64 skin PNG here, or tap to choose one</span>
+      <span>Drop a 64&times;64 skin PNG, or tap to choose one</span>
     </label>
     <div id="skinerr" class="box err" hidden></div>
     <div id="skinbox" hidden>
       <div class="preview">
         <canvas id="preview" width="512" height="512" aria-label="Skin preview"></canvas>
-        <ul class="legend"><li><i class="sw wm"></i>watermark pixels</li><li><i class="sw kn"></i>search pixels</li></ul>
+        <ul class="legend"><li><i class="sw kn"></i>search pixels</li></ul>
       </div>
       <dl id="info"></dl>
     </div>
@@ -41,35 +39,35 @@
     <div class="row modes">
       <label class="inline"><input type="radio" name="mode" value="mojang" checked> Mojang texture link</label>
       <label class="inline"><input type="radio" name="mode" value="namemc"> NameMC skin page</label>
-      <label class="inline"><input type="radio" name="mode" value="both"> Both (one click)</label>
+      <label class="inline"><input type="radio" name="mode" value="both"> Both</label>
     </div>
-    <p id="bothnote" class="muted" hidden>Both runs the NameMC search first, then a Mojang search on that result. The two phases add up rather than multiply (6 hex digits each is about 34 million tries instead of 16<sup>12</sup>), so this is the fastest way to get both.</p>
-    <label class="inline" id="unusedwrap" hidden><input id="unusedonly" type="checkbox"> Unused pixels only (never drawn at all, but much slower)</label>
+    <p id="bothnote" class="muted" hidden>NameMC runs first, then Mojang. The phases add up instead of multiplying, so this is much faster than searching both at once.</p>
+    <label class="inline" id="unusedwrap" hidden><input id="unusedonly" type="checkbox"> Unused pixels only (slower, never drawn at all)</label>
     <fieldset class="grp"><legend id="g1legend" hidden></legend>
     <div class="grid">
-      <label><span id="prefixlabel">Prefixes (hex, no leading 0)</span><input id="prefixes" type="text" placeholder="c0ffee, beef" autocomplete="off" spellcheck="false"></label>
+      <label><span id="prefixlabel">Prefixes (hex, not starting with 0)</span><input id="prefixes" type="text" placeholder="c0ffee, beef" autocomplete="off" spellcheck="false"></label>
       <label>Suffixes (hex)<input id="suffixes" type="text" placeholder="dead" autocomplete="off" spellcheck="false"></label>
       <label><span id="zeroslabel">Minimum leading zeros</span><input id="zeros" type="number" min="0" max="15" value="0"></label>
     </div>
     </fieldset>
-    <fieldset class="grp" id="g2" hidden><legend>Phase 2: Mojang texture link targets (id without leading zeros; prefix may not start with 0)</legend>
+    <fieldset class="grp" id="g2" hidden><legend>Phase 2: Mojang</legend>
     <div class="grid">
-      <label>Prefixes (hex, no leading 0)<input id="mprefixes" type="text" placeholder="cafe" autocomplete="off" spellcheck="false"></label>
+      <label>Prefixes (hex, not starting with 0)<input id="mprefixes" type="text" placeholder="cafe" autocomplete="off" spellcheck="false"></label>
       <label>Suffixes (hex)<input id="msuffixes" type="text" autocomplete="off" spellcheck="false"></label>
       <label>Minimum leading zeros<input id="mzeros" type="number" min="0" max="15" value="0"></label>
     </div>
     </fieldset>
     <div class="row">
-      <label class="inline"><input type="radio" name="stop" value="n" checked> Stop after <input id="stopn" type="number" min="1" value="1" class="small"> hit(s)</label>
-      <label class="inline"><input type="radio" name="stop" value="all"> Until every target is found</label>
+      <label class="inline"><input type="radio" name="stop" value="n" checked> Stop after <input id="stopn" type="number" min="1" value="1" class="small"> hits</label>
+      <label class="inline"><input type="radio" name="stop" value="all"> Until all targets are found</label>
     </div>
-    <label class="inline"><input id="wm" type="checkbox" checked> Include the invisible skinhash watermark (6 unused transparent pixels)</label>
+    <label class="inline"><input id="wm" type="checkbox" checked> Add watermark</label>
     <div id="targeterr" class="box err" hidden></div>
     <div id="expect" class="muted"></div>
     <div class="row">
       <button id="start" class="primary" disabled>Start search</button>
       <button id="stop" disabled>Stop</button>
-      <button id="bench" disabled title="10 second speed test without targets">Benchmark (10 s)</button>
+      <button id="bench" disabled title="10 second speed test">Benchmark (10 s)</button>
     </div>
   </section>
 
@@ -92,11 +90,11 @@
   <section class="notes">
     <h2>Notes</h2>
     <ul>
-      <li>Everything runs locally in your browser; the skin never leaves your computer.</li>
-      <li>Only fully transparent pixels change (the end of the left sleeve overlay, plus the watermark in an unused corner). Nothing visible is touched.</li>
-      <li>Every hit is rebuilt on the CPU, hashed again, compared pixel by pixel with your original and re-encoded with pako before it is shown.</li>
-      <li>Upload the downloaded PNG to Minecraft <b>as is</b>. Any editing or re-saving changes the id. Mojang re-encodes uploads, but hidden pixels survive.</li>
-      <li>The watermark (<code>sokripon skinhash</code> + version byte) is included by default so skins made with this tool can be recognised.</li>
+      <li>Everything runs locally. Your skin never leaves your computer.</li>
+      <li>Only fully transparent pixels change, so the skin looks identical.</li>
+      <li>NameMC mode sets alpha 1 on 3 pixels. That should be invisible in game, but is not verified.</li>
+      <li>Every hit is rebuilt and re-checked on the CPU before it is shown.</li>
+      <li>Upload the downloaded PNG to Minecraft as is. Re-saving or editing it changes the id.</li>
     </ul>
   </section>
 </main>

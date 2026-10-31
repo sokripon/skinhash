@@ -11,7 +11,7 @@ body { margin: 0; background: var(--bg); color: var(--fg); font: 16px/1.5 system
 main { max-width: 760px; margin: 0 auto; padding: 16px; }
 h1 { margin: 8px 0 0; font-size: 1.7rem; }
 h1 .sub { color: var(--muted); font-weight: 400; font-size: 1.1rem; }
-h2 { font-size: 1.05rem; margin: 24px 0 8px; }
+h2 { font-size: 1.05rem; margin: 28px 0 8px; }
 .lead { color: var(--muted); margin-top: 4px; }
 code { background: var(--card); border: 1px solid var(--line); border-radius: 4px; padding: 0 4px; font-size: .9em; }
 section { margin-bottom: 8px; }
@@ -25,7 +25,7 @@ section { margin-bottom: 8px; }
   background: repeating-conic-gradient(#8884 0% 25%, #fff2 0% 50%) 0 0 / 16px 16px; }
 .legend { display: flex; gap: 16px; list-style: none; padding: 0; margin: 0; color: var(--muted); font-size: .85rem; }
 .sw { display: inline-block; width: 10px; height: 10px; margin-right: 5px; border-radius: 2px; }
-.sw.wm { background: #14c8d8; } .sw.kn { background: #e02ad0; }
+.sw.kn { background: #e02ad0; }
 dl { display: grid; grid-template-columns: max-content 1fr; gap: 4px 12px; margin: 0; }
 dt { color: var(--muted); } dd { margin: 0; overflow-wrap: anywhere; }
 .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 10px; }

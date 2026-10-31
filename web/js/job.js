@@ -53,7 +53,7 @@ export function prepareSkin(orig, { watermark = true, kmax = MAX_K } = {}) {
   if (!eligible) {
     const bad = [];
     for (let i = 0; i < MIN_K; i++) { const x = W - MIN_K + i; if (!kset.has((H - 1) * W + x)) bad.push(`(${x},${H - 1})`); }
-    reason = `Fast mode needs the last ${MIN_K} pixels of the image (bottom row, right end) to be invisible: alpha 0 on the overlay layer or in an unused area. These are not: ${bad.join(" ")}.`;
+    reason = `Needs the last ${MIN_K} pixels of the image (bottom row, right end) to be invisible. These are not: ${bad.join(" ")}.`;
   }
   return { orig, rgba, raw: rawScanlines(rgba), wm, knobs, kvis, kmaxUsable, eligible, reason };
 }
@@ -152,7 +152,7 @@ function parseDeflate(z, start, len, raw, split) {
     const sym = decode(lc);
     if (sym < 0) throw new Unsupported("bad literal/length code");
     if (op === split && T_bits === -1) T_bits = st;
-    if (op > split && T_bits === -1) throw new Unsupported("a match straddles the first knob byte");
+    if (op > split && T_bits === -1) throw new Unsupported("a match straddles the first search byte");
     if (sym === 256) { E_bits = s.pos; break; }
     if (sym < 256) {
       if (op >= RAW_LEN) throw new Unsupported("output overflow");
@@ -172,7 +172,7 @@ function parseDeflate(z, start, len, raw, split) {
   }
   if (op !== RAW_LEN) throw new Unsupported("parser did not reproduce the raw data");
   for (let i = 0; i < RAW_LEN; i++) if (out[i] !== raw[i]) throw new Unsupported("parser did not reproduce the raw data");
-  if (T_bits === -1) throw new Unsupported("no symbol starts at the first knob byte");
+  if (T_bits === -1) throw new Unsupported("no symbol starts at the first search byte");
   if (ntail !== RAW_LEN - split) throw new Unsupported("tail is not all literals");
   if (((E_bits - start * 8 + 7) >> 3) + 4 !== len) throw new Unsupported("trailing data after the block");
   return { litlen, T_bits: T_bits - start * 8, E_bits: E_bits - start * 8, ntail };

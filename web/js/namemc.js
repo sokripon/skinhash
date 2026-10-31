@@ -46,7 +46,7 @@ export function prepareNameMc(orig, { watermark = true, unusedOnly = false } = {
   const pref = elig.filter((i) => !tailSet.has(i));
   const pickFrom = pref.length ? pref : elig;
   const res = { orig, wm, wmSet, unusedOnly, elig: elig.length, eligible: elig.length >= NK && pickFrom.length >= NK };
-  if (!res.eligible) { res.reason = `Only ${elig.length} usable pixel(s) for the NameMC knob (fully transparent overlay or unused pixels); need ${NK}.`; return res; }
+  if (!res.eligible) { res.reason = `Only ${elig.length} usable invisible pixel(s), need ${NK}.`; return res; }
   const pick = pickFrom.slice(0, NK).sort((a, b) => a - b);
   res.knobIdx = pick;
   res.knobs = pick.map((i) => [i % W, Math.floor(i / W)]);

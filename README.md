@@ -20,6 +20,7 @@ py skinhash.py search  skins/me.png -p c0ffee        # id (trimmed) starts with 
 py skinhash.py search  skins/me.png -z 8             # keep ids with >= 8 leading zeros (shortest links)
 py skinhash.py search  skins/me.png -s dead -n 3     # id ends with dead, stop after 3 hits
 py skinhash.py verify  skins/me.png found/me/<id>.png
+py skinhash.py search  skins/me.png --gpu --fast -z 10 # never fall back to the slow generic search
 ```
 
 Options of `search` (forwarded to the finder): `-p HEX` (prefix of the TRIMMED id, repeatable, may not

@@ -8,6 +8,8 @@
       -p HEX matches the trimmed id (leading zeros dropped, as in the URL); -z N = N leading zeros.
       --gpu: dump a job with fastfinder and search on the GPU with gpufinder.exe (CUDA); falls back
       to the CPU fastfinder if gpufinder is missing or fails its self-check.
+      --fast: require fast mode (CPU or GPU); stop with the reason instead of falling back to the
+      300x slower generic search. (Fast mode needs the last pixels of the skin to be invisible.)
       --all: keep going until every -p/-s/-z target has a hit (restarts without each found
       target, so no duplicates pile up; -n is ignored).
       Every search adds an invisible watermark (6 transparent unused pixels whose RGB spells
@@ -357,7 +359,9 @@ def gpu_search(rawp, k, outdir, args, rgba, ext, on_hit=None):
 
 
 def cmd_search(path, args, unused_only, generic=False, k=6, out=None, gpu=False, watermark=True,
-               all_mode=False):
+               all_mode=False, require_fast=False):
+    if require_fast and (generic or unused_only):
+        sys.exit("--fast can't be combined with --generic or --unused-only")
     orig = load_rgba(path)
     rgba = bytearray(orig)
     tail = {(W - k + i, H - 1) for i in range(k)}  # keep the fast-mode pixels free
@@ -377,6 +381,10 @@ def cmd_search(path, args, unused_only, generic=False, k=6, out=None, gpu=False,
     ext = ".exe" if os.name == "nt" else ""
     kset = set(kp)
     fast_ok = not generic and all((W - k + i, H - 1) in kset for i in range(k))
+    if require_fast and not fast_ok:
+        bad = [(W - k + i, H - 1) for i in range(k) if (W - k + i, H - 1) not in kset]
+        sys.exit(f"--fast: fast mode is not possible for this skin. The last {k} pixels must all be "
+                 f"invisible (alpha 0, overlay or unused), but these are not: {bad}")
 
     def launch(args, on_hit=None):
         if fast_ok:
@@ -389,6 +397,9 @@ def cmd_search(path, args, unused_only, generic=False, k=6, out=None, gpu=False,
             rc = run_finder(cmd, rgba, on_hit)
             if rc != 4:
                 return rc
+            if require_fast:
+                sys.exit("--fast: fastfinder reports this skin's compressed structure is unsupported; "
+                         "run without --fast to use the generic search")
             print("fastfinder: structure unsupported, falling back to hashfinder", flush=True)
         elif not generic:
             if gpu:
@@ -468,6 +479,8 @@ def main():
     a = [x for x in a if x != "--no-watermark"]
     all_mode = "--all" in a
     a = [x for x in a if x != "--all"]
+    require_fast = "--fast" in a
+    a = [x for x in a if x != "--fast"]
     k = 6
     out = None
     if "--out" in a:
@@ -483,7 +496,7 @@ def main():
     elif len(a) >= 2 and a[0] == "knobs":
         cmd_knobs(a[1], unused_only)
     elif len(a) >= 2 and a[0] == "search":
-        cmd_search(a[1], a[2:], unused_only, generic, k, out, gpu, watermark, all_mode)
+        cmd_search(a[1], a[2:], unused_only, generic, k, out, gpu, watermark, all_mode, require_fast)
     elif len(a) >= 2 and a[0] == "detect":
         cmd_detect(a[1:])
     elif len(a) == 3 and a[0] == "verify":

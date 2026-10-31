@@ -39,7 +39,7 @@ If you change any pixel, you get a completely different, unpredictable id. Findi
 
 **Rules that apply to all modes:**
 - Alpha is never changed. Only the RGB under an alpha of 0 is.
-- The tool **checks** each skin instead of assuming. Fast mode is only used if every one of its pixels is a transparent overlay pixel or an unused pixel. Otherwise it falls back to generic mode with other invisible pixels.
+- The tool **checks** each skin instead of assuming. Fast mode is only used if every one of its pixels is a transparent overlay pixel or an unused pixel. Otherwise it falls back to generic mode with other invisible pixels. Add `--fast` to stop with the reason instead of falling back to the 300× slower generic search.
 - Before you upload, `verify` re-checks every hit:
   - the file hashes to its name;
   - real zlib reproduces it byte for byte;

@@ -5,7 +5,8 @@ read and the pixels skinhash changes.
 
 Mod areas checked against the mods' source: Ears (Ears-Fifth-Edition 3d42f72),
 Customizable Player Models (129b76f, incl. its free_space_template.png) and Mine
-Little Pony (0b9e4af). Tails is as reported, not checked. Layout masks and
+Little Pony (0b9e4af). Layout UVs, forced-opaque regions and the deadmau5 box
+checked against the Minecraft 26.3 client. Tails is as reported, not checked. Layout masks and
 skinhash pixels come from skinhash.py.
 """
 import os
@@ -210,7 +211,7 @@ def main():
     inset("Zoom: x 48–63, y 63 (search pixels)", 48, 63, 16, 1, 24, ly)
 
     d.text((OX, H - 30), "Checked against source: Ears 3d42f72, CPM 129b76f, Mine Little Pony 0b9e4af. "
-           "Tails as reported (not checked). deadmau5 box from the vanilla player model.", font=F_S, fill=C["muted"])
+           "Minecraft 26.3: layout, opaque regions, deadmau5. Tails as reported (not checked).", font=F_S, fill=C["muted"])
     out = os.path.join(HERE, "skin-areas.png")
     img.save(out, optimize=True)
     print("wrote", out)

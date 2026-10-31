@@ -245,7 +245,9 @@ The rate is about 3.85e9 candidates/s on an RTX 5060 Ti, up from about 1.2e9. Fo
   where the variable region, the 9 padding bytes and the 12 constant IEND bytes fit in the last 64-byte
   block (`V0 + nvar + 12 + 9 <= 64`). For the example skin, and the other skins we tried, K=6 did not fit: the variable region starts
   8-11 bytes into its block and is 40 bytes long. K=5 fits (`V0` 7-9, 34-35 bytes), usually within a few value sets.
-  If nothing fits, it falls back to the best 2-block configuration (about 2.1e9/s).
+  If nothing fits, it first tries length tuning: it gives 1-6 invisible alpha-0 pixels earlier in the image random
+  RGB values until a one-block layout exists (typically 50-100 tries of ~1 ms), and only then falls back to the
+  best 2-block configuration (about 2.1e9/s). `--no-length-tuning` turns this off.
 - **Cached decoding.** Candidate index = `outer * 24 + t`. One thread owns one `outer`. It decodes the first
   m-4 positions of the permutation once (32-bit math, its thread id carry-added to the launch's base digits),
   emits their Huffman codes into a word image and keeps the bit accumulator, CRC-32 state and Adler-b sum. It
@@ -342,7 +344,7 @@ Measured (12 threads, RTX 5060 Ti), candidates per second:
 
 | mode           | CPU     | GPU     |
 |----------------|---------|---------|
-| default knob   | ~135M   | ~2.8G   |
+| default knob   | ~135M   | ~3.1G   |
 | `--unused-only`| ~6.8M   | ~148M   |
 
 A 16^n prefix takes 16^n / rate: 8 hex digits ~1.5 s, 10 digits ~6.5 min, 12 digits ~28 h on the GPU.
@@ -350,7 +352,8 @@ A 16^n prefix takes 16^n / rate: 8 hex digits ~1.5 s, 10 digits ~6.5 min, 12 dig
 Combining with the Mojang id: NameMC ignores RGB under alpha 0 and the Mojang search only changes RGB under
 alpha 0, so run the NameMC search first, then `mojang` on its output (`both` does this in one command). The alpha-1 pixels are not knobs for
 `mojang`, and the NameMC id of the result is the same. Limit: the extra bytes next to the tail usually stop
-the GPU Mojang search from finding a one-block layout, so it runs at ~2.1G/s instead of ~3.9G/s.
+the GPU Mojang search from finding a one-block layout. Length tuning fixes that by changing the RGB of a few
+other invisible (alpha 0) pixels, so the Mojang phase still runs at ~3.9G/s instead of ~2.1G/s.
 
 ```
 py skinhash.py both skins/me.png --namemc-prefix beef --mojang-prefix cafe
@@ -375,7 +378,7 @@ The tool matches prefixes on those 16 digits, so `-z N` gives a NameMC link star
   ported from the CUDA finders.
 - Same safety checks: a GPU gate against CPU test vectors before every search, and a CPU check of every hit
   (ids, and only invisible pixels changed) before it's shown.
-- About 2.9G/s for Mojang links and 2.3G/s for NameMC on an RTX 5060 Ti in Chrome (~75-80% of native).
+- About 2.9G/s for Mojang links and 2.4G/s for NameMC on an RTX 5060 Ti in Chrome (~75-80% of native).
 
 Details and tests: [web/README.md](web/README.md).
 

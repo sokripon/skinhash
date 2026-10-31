@@ -49,6 +49,83 @@ ${Hh} = t1 + (${ror(A, 2)} ^ ${ror(A, 13)} ^ ${ror(A, 22)}) + ((${A} & ${B}) | (
   return c;
 }
 
+const rot = (x, n) => ((x >>> n) | (x << (32 - n))) >>> 0;
+const sig0 = (x) => (rot(x, 7) ^ rot(x, 18) ^ (x >>> 3)) >>> 0, sig1 = (x) => (rot(x, 17) ^ rot(x, 19) ^ (x >>> 10)) >>> 0;
+const R_NAMES = ["a", "b", "c", "d", "e", "f", "g", "h"];
+const roundNames = (i) => [0, 1, 2, 3, 4, 5, 6, 7].map((j) => R_NAMES[(((j - i) % 8) + 8) % 8]);
+function roundCode(i, term) {
+  const [A, B, C, D, E, F, G, Hh] = roundNames(i);
+  return `{ let t1 = ${Hh} + (${ror(E, 6)} ^ ${ror(E, 11)} ^ ${ror(E, 25)}) + (${G} ^ (${E} & (${F} ^ ${G}))) + ${term};
+${D} = ${D} + t1;
+${Hh} = t1 + (${ror(A, 2)} ^ ${ror(A, 13)} ^ ${ror(A, 22)}) + ((${A} & ${B}) | (${C} & (${A} | ${B}))); }\n`;
+}
+
+/** Fast NameMC kernel with the work split by what changes. Only message word 11 (kp[2]) changes per candidate;
+ *  words 9 and 10 change per thread; everything else is a job constant. So:
+ *   - the host (here) runs rounds 0-8 and every schedule word that depends only on constants;
+ *   - `pre` runs once per thread: rounds 9-10, the schedule words that do not depend on word 11, and for each
+ *     schedule word that does, the sum of its independent terms (pw);
+ *   - `body` runs per candidate: the dependent schedule words, rounds 11-63, and the constant second block.
+ *  `pre` needs v = nm_vw(lo, hi); `body` needs p11 (word 11) and leaves the id in s0, s1. Same code in the
+ *  search loop and in the correctness-gate entry point. */
+export function fastParts(prep, D) {
+  const mid = Array.from(prep.mid), lvl = new Array(64).fill(0), val = new Array(64).fill(0);
+  for (let i = 0; i < 16; i++) { lvl[i] = i === 9 || i === 10 ? 1 : i === 11 ? 2 : 0; val[i] = D.img[i]; }
+  for (let i = 16; i < 64; i++) {
+    lvl[i] = Math.max(lvl[i - 16], lvl[i - 15], lvl[i - 7], lvl[i - 2]);
+    if (lvl[i] === 0) val[i] = (val[i - 16] + sig0(val[i - 15]) + val[i - 7] + sig1(val[i - 2])) >>> 0;
+  }
+  const nm = (i) => (lvl[i] === 0 ? hex(val[i]) : lvl[i] === 1 ? `u${i}` : `d${i}`);
+  const sg0 = (x) => `(${ror(x, 7)} ^ ${ror(x, 18)} ^ (${x} >> 3u))`, sg1 = (x) => `(${ror(x, 17)} ^ ${ror(x, 19)} ^ (${x} >> 10u))`;
+  // state after rounds 0-8 (all constant)
+  let st = mid.slice();
+  for (let i = 0; i < 9; i++) {
+    const [a, b, c, d, e, f, g, h] = st;
+    const t1 = (h + (rot(e, 6) ^ rot(e, 11) ^ rot(e, 25)) + ((e & f) ^ (~e & g)) + K256[i] + val[i]) >>> 0;
+    const t2 = ((rot(a, 2) ^ rot(a, 13) ^ rot(a, 22)) + ((a & b) ^ (a & c) ^ (b & c))) >>> 0;
+    st = [(t1 + t2) >>> 0, a, b, c, (d + t1) >>> 0, e, f, g];
+  }
+  let pre = "let p9 = v.x; let p10 = v.y; let u9 = p9; let u10 = p10;\n" + Array.from({ length: 8 }, (_, j) => `var q${j} = 0u;`).join(" ") + "\n{\n";
+  const n9 = roundNames(9);
+  st.forEach((x, j) => { pre += `var ${n9[j]} = ${hex(x)};\n`; });
+  pre += roundCode(9, `${hex(K256[9])} + p9`) + roundCode(10, `${hex(K256[10])} + p10`);
+  const n11 = roundNames(11);
+  n11.forEach((n, j) => { pre += `q${j} = ${n};\n`; });
+  pre += "}\n";
+  let body = "let d11 = p11;\n";
+  const terms = (i) => [[i - 16, null], [i - 15, sg0], [i - 7, null], [i - 2, sg1]];
+  for (let i = 16; i < 64; i++) {
+    if (lvl[i] === 1) {
+      let cs = 0;
+      const ex = [];
+      for (const [j, f] of terms(i)) {   // constant terms are summed here: WGSL rejects overflowing constant expressions
+        if (lvl[j] === 0) cs = (cs + (f === sg0 ? sig0(val[j]) : f === sg1 ? sig1(val[j]) : val[j])) >>> 0;
+        else ex.push(f ? f(nm(j)) : nm(j));
+      }
+      pre += `let u${i} = ${[...(cs ? [hex(cs)] : []), ...ex].join(" + ")};\n`;
+    } else if (lvl[i] === 2) {
+      let cs = 0, ex = [], dx = [];
+      for (const [j, f] of terms(i)) {
+        if (lvl[j] === 0) cs = (cs + (f === sg0 ? sig0(val[j]) : f === sg1 ? sig1(val[j]) : val[j])) >>> 0;
+        else if (lvl[j] === 1) ex.push(f ? f(nm(j)) : nm(j));
+        else dx.push(f ? f(nm(j)) : nm(j));
+      }
+      const parts = [...(cs ? [hex(cs)] : []), ...ex];
+      if (parts.length > 1 || (parts.length === 1 && ex.length)) { pre += `let pw${i} = ${parts.join(" + ")};\n`; dx.unshift(`pw${i}`); }
+      else if (parts.length === 1) dx.unshift(parts[0]);
+      body += `let d${i} = ${dx.join(" + ")};\n`;
+    }
+  }
+  n11.forEach((n, j) => { body += `var ${n} = q${j};\n`; });
+  for (let i = 11; i < 64; i++) {
+    const term = lvl[i] === 0 ? hex((K256[i] + val[i]) >>> 0) : `${hex(K256[i])} + ${nm(i)}`;
+    body += roundCode(i, term);
+  }
+  mid.forEach((x, j) => { body += `var s${j} = ${hex(x)} + ${R_NAMES[j]};\n`; });
+  body += shaCode({ kw: (i) => hex(D.kw[64 + i]) });
+  return { pre, body };
+}
+
 const be = (t, o) => ((t[o] << 24) | (t[o + 1] << 16) | (t[o + 2] << 8) | t[o + 3]) >>> 0;
 
 export function nmDerive(prep) {
@@ -100,15 +177,8 @@ fn nm_vw(lo: u32, hi: u32) -> vec3<u32> {
                    ((lo & 0xFFFFFFu) << 8u) | 1u);
 }
 `;
-  if (fast) {
-    s += `fn nm_id(p9: u32, p10: u32, p11: u32) -> vec2<u32> {
-  ${mid}
-${shaCode({ words: (i) => (i === 9 ? "p9" : i === 10 ? "p10" : i === 11 ? "p11" : hex(D.img[i])) })}
-${shaCode({ kw: (i) => hex(D.kw[64 + i]) })}
-  return vec2<u32>(s0, s1);
-}
-`;
-  } else {
+  const FP = fast ? fastParts(prep, D) : null;
+  if (!fast) {
     s += `fn nm_id(p0: u32, p1: u32, p2: u32) -> vec2<u32> {
   ${mid}
   var vw = array<u32, 3>(p0, p1, p2);
@@ -137,11 +207,13 @@ fn nm_search(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_in
   let hi = DP[2] + select(0u, 1u, lo < DP[1]);
   let v = nm_vw(lo, hi);
   let l24 = lo & 0xFFFFFFu;
+${FP.pre}
   var m0 = 0xFFFFFFFFu; var m1 = 0xFFFFFFFFu;
   for (var t = 0u; t < ${INNER}u; t++) {
-    let id = nm_id(v.x, v.y, ((l24 + t) << 8u) | 1u);
-    if (id.x < m0 || (id.x == m0 && id.y < m1)) { m0 = id.x; m1 = id.y; }
-    if (is_hit(id.x, id.y)) { record(lo + t, hi); }
+    let p11 = ((l24 + t) << 8u) | 1u;
+${FP.body}
+    if (s0 < m0 || (s0 == m0 && s1 < m1)) { m0 = s0; m1 = s1; }
+    if (is_hit(s0, s1)) { record(lo + t, hi); }
   }
   note_best(m0, m1);
 }
@@ -161,8 +233,11 @@ fn nm_search(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_in
 fn nm_test(@builtin(local_invocation_index) li: u32) {
   if (li < ${nTests}u) {
     let v = nm_vw(DP[2u * li], DP[2u * li + 1u]);
-    let id = nm_id(v.x, v.y, v.z);
-    TOUT[2u * li] = id.x; TOUT[2u * li + 1u] = id.y;
+${fast ? `${FP.pre}
+    let p11 = v.z;
+${FP.body}
+    TOUT[2u * li] = s0; TOUT[2u * li + 1u] = s1;` : `    let id = nm_id(v.x, v.y, v.z);
+    TOUT[2u * li] = id.x; TOUT[2u * li + 1u] = id.y;`}
   }
 }
 `;

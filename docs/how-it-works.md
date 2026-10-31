@@ -101,7 +101,16 @@ including what didn't help, is in the [optimization log](optimizations.md).
 
 **Pixel count.** `fastfinder --dump-job --auto` tries pixel counts from 6 downwards, with up to 400 random
 value sets each, and picks the largest count whose changing bytes fit one SHA block. On the example skin that is
-5; 6 did not fit on the skins we tried. If nothing fits, it falls back to the best 2-block configuration, at about 2.1 G/s.
+5; 6 did not fit on the skins we tried. If nothing fits, length tuning (below) is tried, and only after that the best
+2-block configuration, at about 2.1 G/s.
+
+**Length tuning.** Whether the changing bytes fit one block depends on the compressed length before them, mod 64.
+For some skins (Dinnerbone, Grumm, any skin that already has NameMC alpha-1 pixels) that is a bad number for every
+K and value set. Then `--auto` changes the RGB of 1-6 alpha-0 pixels earlier in the image (unused first, never
+`RESERVED`, never the watermark or the last row), about 6 bytes of compressed length per pixel, until a one-block
+layout with K >= 5 exists. This takes 50-100 tries of about 1 ms each and has worked on every skin tried. The
+value set is chosen afterwards, and the tuned image is kept across rollovers. The pixels are invisible, don't
+touch the NameMC id, and are listed by the CLI and by `skinhash.py pixels`. `--no-length-tuning` disables it.
 
 ### Value-set rollover
 
@@ -185,12 +194,13 @@ hashes 1024 counters that differ only in the last pixel, which shares the work b
 **Combining with a Mojang id.** The Mojang search changes only RGB under alpha 0 (and the alpha-0
 watermark), which NameMC ignores. So: `namemc` first, then `mojang` on the result (the `both` command does exactly this). The alpha-1 pixels are
 fixed for `mojang`, and `verify` still passes (also against the original skin). Side effect: the bytes next to the tail often prevent the
-one-block layout of GPU fast mode, which then runs at about 2.1 G/s instead of 3.9 G/s.
+one-block layout of GPU fast mode. Length tuning (section 4) restores it, so the Mojang phase of `both` runs at
+~3.9 G/s instead of 2.1 G/s.
 
 | Mode | Rate |
 |---|---|
 | NameMC, CPU, default knob | ~135M/s |
-| NameMC, GPU, default knob | ~2.8G/s |
+| NameMC, GPU, default knob | ~3.1G/s |
 | NameMC, CPU, `--unused-only` | ~6.8M/s |
 | NameMC, GPU, `--unused-only` | ~148M/s |
 

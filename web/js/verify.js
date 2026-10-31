@@ -32,6 +32,10 @@ export async function verifyHit(job, prep, idx, targets) {
     const dec = decodePng(full).rgba, orig = prep.orig;
     const allowed = new Set();
     prep.wm.forEach(([x, y]) => allowed.add(y * W + x));
+    for (const i of prep.tune || []) {   // length-tuning pixels: RGB under alpha 0, never reserved or base layer
+      if (RESERVED[i] || MASKS.base[i] || orig[i * 4 + 3] !== 0) return { ok: false, error: `bad length-tuning pixel ${i}` };
+      allowed.add(i);
+    }
     job.knob.forEach((o) => { const r = Math.floor(o / 257), c = (o % 257) - 1; allowed.add(r * W + (c >> 2)); });
     let changed = 0;
     for (let i = 0; i < W * H; i++) {
@@ -47,7 +51,7 @@ export async function verifyHit(job, prep, idx, targets) {
     if (!eq(mojangPng(dec), full)) return { ok: false, error: "re-encode of the decoded pixels differs" };
     const nmId = namemcIdHex(dec);
     if (nmId !== namemcIdHex(orig)) return { ok: false, error: "the NameMC id would change" };
-    return { ok: true, png: full, hex, id: hex.replace(/^0+/, "") || "0", whys, changed, nmId };
+    return { ok: true, png: full, hex, id: hex.replace(/^0+/, "") || "0", whys, changed, nmId, tune: [...(prep.tune || [])] };
   } catch (e) {
     return { ok: false, error: String(e.message || e) };
   }
@@ -104,6 +108,7 @@ export async function verifyBoth(orig, nmPrep, r1, r2, nmTargets, mojTargets) {
     if (!eq(mojangPng(dec), png)) return { ok: false, error: "re-encode of the decoded pixels differs" };
     const knobs = new Set(nmPrep.knobIdx), hidden = new Set(nmPrep.wmSet);
     for (let x = W - 6; x < W; x++) hidden.add((H - 1) * W + x);   // Mojang fast-mode tail (RGB under alpha 0)
+    for (const i of r2.tune || []) hidden.add(i);                  // Mojang length-tuning pixels (RGB under alpha 0)
     let nk = 0;
     for (let i = 0; i < W * H; i++) {
       let same = true;

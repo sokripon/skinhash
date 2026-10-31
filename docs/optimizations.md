@@ -16,6 +16,8 @@ was checked against real zlib before its numbers were trusted. The ideas behind 
 | 4a | GPU: 5 pixels so every candidate fits one SHA block | 1.93 G/s | ×1.7 |
 | 4b | GPU: new enumeration, cached work, constant tail | 3.58 G/s | ×1.85 |
 | 4c | GPU: block size / occupancy tuning | ~3.85 G/s | ×1.07 |
+| 5 | Mojang search on skins that had no one-block layout (Dinnerbone, Grumm, every NameMC hit): length tuning | 2.1 → ~3.7–4.1 G/s on those skins | ×1.8 on them |
+| 6 | NameMC GPU kernel: constant rounds and schedule hoisted out of the 1024-candidate loop | 2.8 → ~3.1 G/s | ×1.12 |
 
 For 10 leading zeros (≈1.1 trillion tries on average) that is ~75 days with step 1, ~7 hours with step 2 and
 ~5 minutes now.
@@ -151,6 +153,69 @@ A rollover costs under a second.
   constants become literals.
 - Nsight Compute counters are blocked on this machine (`ERR_NVGPUCTRPERM`), so all tuning was by experiment.
 
+## Step 5: length tuning for 2-block skins, 2.1 → ~3.7–4.1 G/s on them
+
+Step 4a needs the variable region (tail literals, Adler-32, CRC-32) plus the 9 SHA padding bytes and the 12
+IEND bytes to fit in the last 64-byte block: `V0 + nvar + 12 + 9 <= 64`, where V0 is the offset of the tail
+inside its block. V0 is `(compressed length before the tail) mod 64`, so for some skins it is simply a bad
+number: Dinnerbone and Grumm (V0 around 27-36), and every skin that already carries NameMC alpha-1 pixels,
+which is the Mojang phase of `both`. No K and no value set helps, the search drops to two blocks per candidate
+and 2.1 G/s.
+
+The fix is to move V0. Changing the RGB of an alpha-0 pixel earlier in the image changes how zlib codes that
+region and shifts the compressed length by a few bytes (about 6 per changed pixel). `fastfinder --auto`
+(given the allowed pixels with `--tune-pixels`) now does this when no one-block layout with K >= 5 exists:
+
+1. It draws random RGB for 1, then 2, ... up to 6 tuning pixels (24 tries per pixel count, at most 4000 tries).
+2. A cheap screen builds one K=5 job and drops the try when V0 is above 24. Otherwise 12 random value sets
+   are probed at K=6, then K=5, for a one-block layout. One try costs one zlib compress and one deflate parse,
+   about 1 ms.
+3. The tuned image is written back (`--tune-out`). `skinhash.py` replaces its raw image with it, so value-set
+   rollovers and the CPU fallback keep the same tuning. The value set is always chosen after tuning, from the
+   byte values absent in the tuned image, so tuning bytes can never collide with it.
+
+Tuning pixels are alpha 0, unused (preferred) or transparent overlay, and never RESERVED, watermark, in the
+last row (Mojang tail, NameMC knobs) or base layer. They are RGB-only changes under alpha 0, so `verify`
+accepts them, the NameMC id (which ignores RGB under alpha 0) stays the same, and `verify` additionally
+rejects any change at a RESERVED pixel. `py skinhash.py pixels` lists the candidates and the CLI prints the
+pixels it changed. `--no-length-tuning` turns it off. The browser version (`web/js/job.js`, `tuneSearch`) does
+the same.
+
+Measured over 8 seeds per skin: Dinnerbone 8/8 within 51-79 tries (3-4 pixels, K=5 or 6), Grumm 8/8 within 1-25
+tries (1-2 pixels), the obus test skin 8/8 within 49-58 tries (3 pixels), six random NameMC-hit variants of
+Steve 48/48 within 54-91 tries (3-4 pixels, nearly always K=6). A whole tuning pass takes 0.3-0.6 s, most of it
+the failed 400-set searches that run first. K=6 fits in most tuned cases, which also means 18! value sets and
+no rollover.
+
+| Case (10 s `bench`) | Before | After |
+|---|---|---|
+| steve.png (already one block) | 3.97 G/s | 3.85-3.95 G/s (no tuning needed, noise only) |
+| NameMC hit made from steve.png | 2.15 G/s | 3.94-4.07 G/s |
+| Dinnerbone | 2.13 G/s | 3.67-4.06 G/s (K=5 tuned layouts with V0=0 ran a little slower) |
+
+## Step 6: NameMC kernel, hoisting constant work, 2.8 → ~3.1 G/s
+
+The NameMC default layout hashes two blocks per candidate. In the first block only message word 11 changes per
+candidate (the 1024 counters of one thread differ only in the last knob pixel); words 9 and 10 change per
+thread, and everything else is a job constant. The old kernel recomputed all 128 rounds and the whole message
+schedule for every candidate.
+
+| Hoisted | Where |
+|---|---|
+| State after rounds 0-8 (constant words only) | Host, uploaded as `c_s9` |
+| Rounds 9-10 | Once per thread |
+| Schedule words that do not depend on word 11 (16, 17, 19, 21, 23) | Once per thread |
+| For every other schedule word, the sum of its terms that do not depend on word 11 (`pw`, 19 values) | Once per thread |
+| Rounds 11-63, the dependent schedule words, the constant second block | Per candidate (117 of 128 rounds, ~12% fewer operations) |
+
+Result with the same correctness gate (96 CPU test vectors, exit 5 on mismatch): 2.78 → 3.2 G/s in direct A/B
+runs of `namemcgpu -b` (the `skinhash.py bench` run on steve.png gave 3.0-3.15 G/s). Block size and occupancy
+variants (128/256/512 threads, 2-4 blocks per SM) were all within noise of each other.
+
+The WGSL kernel (`web/js/nmgpu.js`, `fastParts`) generates the same split, with the constant parts folded in
+JavaScript (WGSL rejects overflowing constant expressions) and the same text used by the search loop and the
+gate. Chrome A/B on the same page: 2.24 → 2.41 G/s (+7%).
+
 ## Rejected ideas
 
 | Idea | Why not |
@@ -170,6 +235,8 @@ No speed-up counted until it reproduced real zlib's bytes.
 | 1 | Hits compared against Python's one-shot zlib |
 | 2 | 1000-permutation self-test at start-up; every hit rebuilt with real zlib |
 | 3–4 | GPU must match 16 CPU test vectors exactly, at start-up and after every rollover; every hit re-hashed on the CPU |
+| 5 | The tuned image goes through the same 1000-permutation self-test and test vectors; `verify` rejects any change at a RESERVED pixel |
+| 6 | The NameMC kernel must still reproduce 96 CPU test vectors; the WGSL gate runs the hoisted code itself |
 | All | `skinhash.py` re-verifies every hit: the hash matches the filename, Python's zlib reproduces the identical bytes, and no visible pixel changed |
 
 Real uploads confirmed the whole pipeline: Mojang assigned exactly the predicted ids.

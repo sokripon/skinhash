@@ -4,7 +4,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { decodePng } from "../js/png.js";
 import { prepareSkin, autoChoose, rebuildJob, makeRng, selfTest, makeTestVectors, decodePerm, fastFile, permCount } from "../js/job.js";
-import { findWatermark } from "../js/model.js";
+import { findWatermark, RESERVED, MASKS } from "../js/model.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 let fail = 0;
@@ -44,5 +44,28 @@ for (const name of ["steve.png"]) {
   const p2 = prepareSkin(bad);
   console.log(`ineligible check: eligible=${p2.eligible} (${p2.reason})`);
   if (p2.eligible) { fail++; console.error("opaque tail should be ineligible"); }
+}
+// length tuning: steve + three NameMC knob pixels (alpha 1) has no one-block layout at K >= 5; tuning finds one,
+// keeps it across value-set rollovers, and only touches alpha-0, non-reserved pixels
+{
+  const rgba = decodePng(new Uint8Array(fs.readFileSync(path.join(here, "..", "..", "skins", "steve.png")))).rgba;
+  const nm = Uint8Array.from(rgba);
+  for (const [j, x] of [55, 56, 57].entries()) nm.set([17 + 40 * j, 201 - 30 * j, 99 + 11 * j, 1], (63 * 64 + x) * 4);
+  const prep = prepareSkin(nm), before = Uint8Array.from(prep.raw);
+  const rng = makeRng(4242);
+  const c = await autoChoose(prep, rng);
+  console.log(`tuning: ${c.tuning ? `${c.tuning.pixels} pixels, ${c.tuning.tries} tries` : "none"} -> K=${c.K} nblk=${c.nblk}, tuned pixels ${JSON.stringify(prep.tune.map((i) => [i % 64, Math.floor(i / 64)]))}`);
+  if (c.nblk !== 1 || c.K < 5) { fail++; console.error("tuning did not give a one-block layout (or the plain skin already had one)"); }
+  if (c.tuning) {
+    const changed = [];
+    for (let y = 0; y < 64; y++) for (let x = 0; x < 64; x++) { const o = y * 257 + 1 + x * 4; for (let k = 0; k < 4; k++) if (prep.raw[o + k] !== before[o + k]) { changed.push(y * 64 + x); break; } }
+    const okPx = changed.length === prep.tune.length && changed.every((i) => prep.tune.includes(i) && !RESERVED[i] && !MASKS.base[i] && nm[i * 4 + 3] === 0 && prep.raw[(Math.floor(i / 64) * 257) + 1 + (i % 64) * 4 + 3] === 0);
+    if (!okPx) { fail++; console.error("tuning changed pixels other than the recorded alpha-0 ones"); }
+    selfTest(c.job, rng, 250); makeTestVectors(c.job, rng, 24);
+    const b = await rebuildJob(prep, rng, c.K, c.nblk);
+    selfTest(b, rng, 100);
+    console.log(`  tuned job passes the self-test; rollover keeps the tuning: nblk=${b.nblk}, same tuned pixels=${okPx}`);
+    if (b.nblk !== 1) { fail++; console.error("rollover lost the one-block layout"); }
+  }
 }
 process.exit(fail ? 1 : 0);

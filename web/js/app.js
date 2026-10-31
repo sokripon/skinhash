@@ -54,6 +54,7 @@ function renderInfo() {
   }
   if (!prep.eligible) rows.push(["Fast mode", `<b>Not possible for this skin.</b> ${prep.reason}`]);
   if (prep.eligible) rows.push(["Search pixels", `${S.chosenK ? "" : "up to "}${k} (x ${W - k}&ndash;${W - 1}, y ${H - 1}), only hidden RGB changes`]);
+  if (S.prep.tune?.length) rows.push(["Length tuning", `${S.prep.tune.length} invisible pixels (alpha 0, RGB only) changed to reach a one-block layout: ${S.prep.tune.map((i) => `(${i % W},${Math.floor(i / W)})`).join(" ")}`]);
   if (S.mode === "both") {
     const n = S.nprep;
     rows.push(["Phase 1 pixels", n.eligible ? `3 pixels ${n.knobs.map(([x, y]) => `(${x},${y})`).join(" ")} (orange) get alpha 1` : `<b>Not possible.</b> ${n.reason}`]);
@@ -305,7 +306,7 @@ async function runMojang(bench, opts) {
     await new Promise((r) => setTimeout(r, 20));
     const chosen = await autoChoose(S.prep, rng, { onProgress: (t) => setStatus(t) });
     let job = chosen.job;
-    S.chosenK = chosen.K; drawPreview(); renderInfo();
+    S.chosenK = chosen.K; S.tuning = chosen.tuning || null; drawPreview(); renderInfo();
     let sets = 0;
     while (!S.stop) {
       sets++;

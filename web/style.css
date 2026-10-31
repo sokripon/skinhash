@@ -53,3 +53,7 @@ button:disabled { opacity: .45; cursor: default; }
 #hits .kind { font-size: .75rem; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
 #hits a.link.m { display: block; margin-bottom: 6px; }
 #hits .btns button.use { padding: 5px 12px; font-size: .9rem; }
+fieldset.grp { border: 0; padding: 0; margin: 8px 0; min-width: 0; }
+fieldset.grp.boxed { border: 1px solid var(--line); border-radius: 8px; padding: 8px 12px 12px; }
+fieldset.grp legend { font-size: .9rem; font-weight: 600; padding: 0 6px; }
+#phasebox { white-space: pre-line; font-size: .9rem; }

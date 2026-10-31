@@ -86,3 +86,37 @@ export async function verifyNmHit(prep, c, targets) {
     return { ok: false, error: String(e.message || e) };
   }
 }
+
+/** Final check of a Both-mode result against the ORIGINAL skin: NameMC id as in phase 1 and matching the NameMC
+ *  targets, Mojang id matching the Mojang targets, and only the NameMC knobs (alpha 0 -> 1), the watermark and the
+ *  Mojang knob RGB under alpha 0 differ. */
+export async function verifyBoth(orig, nmPrep, r1, r2, nmTargets, mojTargets) {
+  try {
+    const png = r2.png, dec = decodePng(png).rgba;
+    const nmId = namemcIdHex(dec);
+    if (nmId !== r1.id16) return { ok: false, error: `NameMC id changed in phase 2 (${r1.id16} -> ${nmId})` };
+    const nmWhys = matchTargets(nmId, nmTargets, true);
+    if (!nmWhys.length) return { ok: false, error: "NameMC id does not match the NameMC targets" };
+    const hex = await sha256Hex(png);
+    if (!matchTargets(hex, mojTargets).length) return { ok: false, error: "Mojang id does not match the Mojang targets" };
+    if (!eq(mojangPng(dec), png)) return { ok: false, error: "re-encode of the decoded pixels differs" };
+    const knobs = new Set(nmPrep.knobIdx), hidden = new Set(nmPrep.wmSet);
+    for (let x = W - 6; x < W; x++) hidden.add((H - 1) * W + x);   // Mojang fast-mode tail (RGB under alpha 0)
+    let nk = 0;
+    for (let i = 0; i < W * H; i++) {
+      let same = true;
+      for (let c = 0; c < 4; c++) if (dec[i * 4 + c] !== orig[i * 4 + c]) same = false;
+      if (same) continue;
+      if (knobs.has(i)) {
+        if (orig[i * 4 + 3] !== 0 || dec[i * 4 + 3] !== 1 || MASKS.base[i]) return { ok: false, error: `bad NameMC knob pixel ${i}` };
+        nk++;
+      } else if (hidden.has(i)) {
+        if (orig[i * 4 + 3] !== 0 || dec[i * 4 + 3] !== 0 || MASKS.base[i]) return { ok: false, error: `hidden-RGB pixel ${i} is not alpha 0 / is on the base layer` };
+      } else return { ok: false, error: `unexpected change at pixel (${i % W},${Math.floor(i / W)})` };
+    }
+    if (nk !== 3) return { ok: false, error: `${nk} NameMC knob pixels changed, expected 3` };
+    return { ok: true, nmId, mojangId: r2.id, nmWhys };
+  } catch (e) {
+    return { ok: false, error: String(e.message || e) };
+  }
+}

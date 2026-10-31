@@ -45,6 +45,18 @@ and shown with its NameMC link, the Mojang texture link of the downloaded PNG, a
 Mojang search": it loads the hit as the current skin and switches to Mojang mode. The alpha-1 pixels are fixed
 there, so the NameMC id stays the same.
 
+### Both mode
+
+"Both (one click)" takes NameMC targets and Mojang targets in two groups and runs two phases: a NameMC search
+(first verified hit, or the first of all targets with "until every target is found"), then, with that hit
+loaded as the base skin, the Mojang search. The alpha-1 NameMC pixels are fixed, so fast mode stays eligible
+(otherwise it stops with a message). The final PNG is verified against the original skin (NameMC id as in phase
+1 and matching its targets, Mojang id matching its targets, only the NameMC knobs, the watermark and hidden RGB
+under alpha 0 differ) and shown with both links. The phases add up instead of multiplying (6 hex digits each is
+about 34 million tries instead of 16^12). With one group empty only the other phase runs. Note: the native
+`skinhash.py verify <original> <final>` rejects the result, because it treats the NameMC alpha-1 pixels as a
+visible change; `verify <phase-1 hit> <final>` passes.
+
 Differences: the zlib stream comes from pako instead of C zlib (proven byte-identical, see below); fast mode
 only (no slow generic CPU mode); fast mode needs the last 5 pixels of the image invisible (the native tool asks
 for 6 and uses K=5 or 6); the whole value-set rollover happens in the page.

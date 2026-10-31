@@ -1,5 +1,5 @@
 """Independent check of a NameMC hit written by the web page (Pillow + hashlib).
-usage: py namemc_check.py BASE.png HIT.png PREFIX [--unused-only]
+usage: py namemc_check.py BASE.png HIT.png PREFIX [--unused-only] [--mojang-knobs] [--id EXPECTED_ID16]
 Checks: NameMC id of HIT equals its filename and starts with PREFIX; only three knob pixels (alpha 0 -> 1, never
 base layer) and the watermark (alpha 0 -> 0, unused area) differ from BASE. Prints OK or FAIL and the reason."""
 import hashlib, os, struct, sys
@@ -25,7 +25,8 @@ def fail(msg):
 base_p, hit_p, prefix = sys.argv[1], sys.argv[2], sys.argv[3]
 unused_only = "--unused-only" in sys.argv
 base, hit = load(base_p), load(hit_p)
-want = os.path.splitext(os.path.basename(hit_p))[0]
+want = sys.argv[sys.argv.index("--id") + 1] if "--id" in sys.argv else os.path.splitext(os.path.basename(hit_p))[0]
+mojang_knobs = "--mojang-knobs" in sys.argv   # Both mode: hidden RGB under alpha 0 may also change on overlay pixels
 got = nm_id(hit)
 if got != want: fail(f"NameMC id {got} != filename {want}")
 if not got.startswith(prefix): fail(f"id {got} does not start with {prefix}")
@@ -38,7 +39,7 @@ for y in range(64):
         unused = (x, y) not in masks_base and (x, y) not in masks_over
         if base[i + 3] == 0 and hit[i + 3] == 1 and (x, y) not in masks_base and (unused or not unused_only):
             knobs += 1
-        elif base[i + 3] == 0 and hit[i + 3] == 0 and unused:
+        elif base[i + 3] == 0 and hit[i + 3] == 0 and (unused or (mojang_knobs and (x, y) not in masks_base)):
             pass
         else:
             fail(f"unexpected change at ({x},{y})")

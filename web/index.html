@@ -41,13 +41,24 @@
     <div class="row modes">
       <label class="inline"><input type="radio" name="mode" value="mojang" checked> Mojang texture link</label>
       <label class="inline"><input type="radio" name="mode" value="namemc"> NameMC skin page</label>
+      <label class="inline"><input type="radio" name="mode" value="both"> Both (one click)</label>
     </div>
+    <p id="bothnote" class="muted" hidden>Both runs the NameMC search first, then a Mojang search on that result. The two phases add up rather than multiply (6 hex digits each is about 34 million tries instead of 16<sup>12</sup>), so this is the fastest way to get both.</p>
     <label class="inline" id="unusedwrap" hidden><input id="unusedonly" type="checkbox"> Unused pixels only (never drawn at all, but much slower)</label>
+    <fieldset class="grp"><legend id="g1legend" hidden></legend>
     <div class="grid">
       <label><span id="prefixlabel">Prefixes (hex, no leading 0)</span><input id="prefixes" type="text" placeholder="c0ffee, beef" autocomplete="off" spellcheck="false"></label>
       <label>Suffixes (hex)<input id="suffixes" type="text" placeholder="dead" autocomplete="off" spellcheck="false"></label>
       <label><span id="zeroslabel">Minimum leading zeros</span><input id="zeros" type="number" min="0" max="15" value="0"></label>
     </div>
+    </fieldset>
+    <fieldset class="grp" id="g2" hidden><legend>Phase 2: Mojang texture link targets (id without leading zeros; prefix may not start with 0)</legend>
+    <div class="grid">
+      <label>Prefixes (hex, no leading 0)<input id="mprefixes" type="text" placeholder="cafe" autocomplete="off" spellcheck="false"></label>
+      <label>Suffixes (hex)<input id="msuffixes" type="text" autocomplete="off" spellcheck="false"></label>
+      <label>Minimum leading zeros<input id="mzeros" type="number" min="0" max="15" value="0"></label>
+    </div>
+    </fieldset>
     <div class="row">
       <label class="inline"><input type="radio" name="stop" value="n" checked> Stop after <input id="stopn" type="number" min="1" value="1" class="small"> hit(s)</label>
       <label class="inline"><input type="radio" name="stop" value="all"> Until every target is found</label>
@@ -71,6 +82,7 @@
       <div><b id="best">0</b><span>best leading zeros</span></div>
       <div><b id="elapsed">0 s</b><span>elapsed</span></div>
     </div>
+    <div id="phasebox" class="box" hidden></div>
     <div id="runerr" class="box err" hidden></div>
     <h2>Hits</h2>
     <p class="muted" id="nohits">None yet.</p>

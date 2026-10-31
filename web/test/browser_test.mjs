@@ -176,6 +176,67 @@ try {
   const ids = spawnSync("py", ["skinhash.py", "namemc-id", nmFile, mjFile], { cwd: repo, encoding: "utf8" });
   const idl = ids.stdout.trim().split(/\r?\n/).map((l) => l.split(/\s+/)[0]);
   check(idl.length === 2 && idl[0] === idl[1] && idl[0] === path.basename(nmFile, ".png"), `combined: NameMC id unchanged by the Mojang search (${idl.join(" = ")})`);
+
+  // ---------- Both mode: NameMC beef, then Mojang cafe, one click ----------
+  await page.click("input[name=mode][value=mojang]");
+  await page.$eval("#file", (el) => { el.value = ""; });
+  await input.uploadFile(skin);   // back to the original skin (the combined flow above left a NameMC hit loaded)
+  await page.waitForFunction((nm) => __skinhash.origNm === nm && !__skinhash.running, { timeout: 10000 }, nmInfo.nm);
+  await page.click("input[name=mode][value=both]");
+  await new Promise((r) => setTimeout(r, 300));
+  const bi = await page.evaluate(() => ({ mode: __skinhash.mode, g2: !document.querySelector("#g2").hidden, start: !document.querySelector("#start").disabled }));
+  check(bi.mode === "both" && bi.g2 && bi.start, "Both mode selected: two target groups shown, Start enabled");
+  await reset();
+  await page.evaluate(() => { __skinhash.hits.length = 0; document.querySelector("#hits").innerHTML = ""; });
+  for (const [id, v] of Object.entries({ prefixes: "beef", suffixes: "", zeros: "0", mprefixes: "cafe", msuffixes: "", mzeros: "0" })) await page.$eval("#" + id, (el, val) => { el.value = val; el.dispatchEvent(new Event("input")); }, v);
+  const tB = Date.now();
+  await page.click("#start");
+  await page.waitForFunction(() => __skinhash.running, { timeout: 5000 });
+  const seen = new Set();
+  await page.waitForFunction(() => { window.__lbl = window.__lbl || new Set(); window.__lbl.add((document.querySelector("#status").textContent.match(/^Phase \d\/\d \((\w+)\)/) || [])[1]); return !__skinhash.running; }, { timeout: 120000, polling: 50 });
+  const phasesSeen = await page.evaluate(() => [...window.__lbl].filter(Boolean));
+  const bo = await page.evaluate(() => ({ err: __skinhash.error, phases: document.querySelector("#phasebox").textContent, hits: __skinhash.hits.map((h) => ({ mode: h.mode, id: h.id, id16: h.id16, murl: h.murl, url: h.url })) }));
+  console.log("  Both: " + ((Date.now() - tB) / 1000).toFixed(1) + " s " + (bo.err ? "ERROR " + bo.err : ""));
+  for (const line of bo.phases.split(String.fromCharCode(10))) console.log("    " + line);
+  check(phasesSeen.includes("NameMC") && phasesSeen.includes("Mojang"), `Both: progress showed both phases (${phasesSeen.join(", ")})`);
+  const fin = bo.hits.filter((h) => h.mode === "both"), inter = bo.hits.filter((h) => h.mode === "namemc");
+  check(!bo.err && fin.length === 1 && inter.length === 1, `Both: 1 intermediate NameMC hit and 1 final result`);
+  if (fin.length === 1 && inter.length === 1) {
+    check(fin[0].id16.startsWith("beef") && fin[0].id.startsWith("cafe") && fin[0].id16 === inter[0].id16, `Both: final NameMC ${fin[0].id16}, Mojang ${fin[0].id.slice(0, 20)}...`);
+    for (const l of await page.$$("#hits a.dl")) await l.click();
+    await new Promise((r) => setTimeout(r, 1500));
+    const finalF = path.join(outDir, fin[0].id + ".png"), interF = path.join(outDir, inter[0].id16 + ".png");
+    check(fs.existsSync(finalF) && fs.existsSync(interF), "Both: final PNG and intermediate PNG downloaded");
+    nmCheck(finalF, "beef", ["--mojang-knobs", "--id", fin[0].id16]);
+    const bv = spawnSync("py", ["skinhash.py", "verify", interF, finalF], { cwd: repo, encoding: "utf8" });
+    check(bv.status === 0 && /^OK/.test(bv.stdout), `Both: skinhash.py verify <phase-1 hit> <final>: ${bv.stdout.trim().slice(0, 80)}`);
+    const bv0 = spawnSync("py", ["skinhash.py", "verify", skin, finalF], { cwd: repo, encoding: "utf8" });
+    console.log(`  info: skinhash.py verify <original> <final> = ${bv0.stdout.trim().slice(0, 90)} (the native Mojang verify treats the NameMC alpha-1 pixels as a visible change)`);
+    const bid = spawnSync("py", ["skinhash.py", "namemc-id", finalF], { cwd: repo, encoding: "utf8" });
+    check(bid.stdout.trim().startsWith(fin[0].id16), `Both: skinhash.py namemc-id shows ${bid.stdout.trim().split(/\s+/)[0]}`);
+    check(path.basename(finalF).startsWith("cafe"), "Both: Mojang id starts with cafe");
+  }
+  // starting again begins with phase 1 on the original skin
+  await reset();
+  await page.evaluate(() => { __skinhash.hits.length = 0; document.querySelector("#hits").innerHTML = ""; });
+  await page.$eval("#mprefixes", (el) => { el.value = "dead"; el.dispatchEvent(new Event("input")); });
+  await page.click("#start");
+  await page.waitForFunction(() => __skinhash.running, { timeout: 5000 });
+  await page.waitForFunction(() => !__skinhash.running, { timeout: 120000, polling: 100 });
+  const again = await page.evaluate(() => ({ err: __skinhash.error, n: __skinhash.hits.filter((h) => h.mode === "both").length, id: (__skinhash.hits.find((h) => h.mode === "both") || {}).id }));
+  check(!again.err && again.n === 1 && again.id.startsWith("dead"), `Both: second run from phase 1 works (Mojang ${again.id?.slice(0, 12)}...)`);
+  // Stop works in phase 1: an impossible-to-hit NameMC target, then Stop
+  await reset();
+  await page.evaluate(() => { __skinhash.hits.length = 0; document.querySelector("#hits").innerHTML = ""; });
+  await page.$eval("#prefixes", (el) => { el.value = "beef0123456789"; el.dispatchEvent(new Event("input")); });
+  await page.click("#start");
+  await page.waitForFunction(() => __skinhash.running, { timeout: 5000 });
+  await page.waitForFunction(() => /Searching \(NameMC\)/.test(document.querySelector("#status").textContent), { timeout: 20000 });
+  await page.click("#stop");
+  await page.waitForFunction(() => !__skinhash.running, { timeout: 20000 });
+  const stopped = await page.evaluate(() => ({ phases: document.querySelector("#phasebox").textContent, hits: __skinhash.hits.length }));
+  console.log("  stopped:", JSON.stringify(stopped));
+  check(stopped.hits === 0 && /stopped/.test(stopped.phases) && /not run/.test(stopped.phases), "Both: Stop in phase 1 ends the run, phase 2 not started");
 } catch (e) {
   console.log("TEST ERROR:", e.message); failures++;
 } finally {

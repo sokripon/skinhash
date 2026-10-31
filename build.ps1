@@ -1,4 +1,4 @@
-# Builds hashfinder, fastfinder, namemcfinder (gcc + zlib) and gpufinder, namemcgpu (nvcc + MSVC). Usage: powershell -File build.ps1 [-NoGpu]
+# Builds hashfinder, fastfinder, namemcfinder (gcc + zlib) and gpufinder, namemcgpu, namemccollide (nvcc + MSVC). Usage: powershell -File build.ps1 [-NoGpu]
 param([switch]$NoGpu)
 $ErrorActionPreference = "Stop"
 Set-Location $PSScriptRoot
@@ -26,5 +26,7 @@ cmd /c "`"$vcvars`" >nul && `"$nvcc`" -O3 -arch=sm_120 -o gpufinder.exe gpufinde
 if ($LASTEXITCODE) { throw "gpufinder build failed" }
 cmd /c "`"$vcvars`" >nul && `"$nvcc`" -O3 -arch=sm_120 -o namemcgpu.exe namemcgpu.cu"
 if ($LASTEXITCODE) { throw "namemcgpu build failed" }
-Remove-Item gpufinder.lib, gpufinder.exp, namemcgpu.lib, namemcgpu.exp -ErrorAction SilentlyContinue
-Write-Host "built: fastfinder.exe hashfinder.exe namemcfinder.exe gpufinder.exe namemcgpu.exe"
+cmd /c "`"$vcvars`" >nul && `"$nvcc`" -O3 -arch=sm_120 -o namemccollide.exe namemccollide.cu"
+if ($LASTEXITCODE) { throw "namemccollide build failed" }
+Remove-Item gpufinder.lib, gpufinder.exp, namemcgpu.lib, namemcgpu.exp, namemccollide.lib, namemccollide.exp -ErrorAction SilentlyContinue
+Write-Host "built: fastfinder.exe hashfinder.exe namemcfinder.exe gpufinder.exe namemcgpu.exe namemccollide.exe"

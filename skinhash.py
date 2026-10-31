@@ -4,7 +4,7 @@ id looks cool.
   py skinhash.py --help           the commands
   py skinhash.py COMMAND --help   options and examples of one command
 
-Commands: mojang, namemc, both (searches), ids, verify, detect, pixels, bench.
+Commands: mojang, namemc, both (searches), collide (NameMC id collisions), ids, verify, detect, pixels, bench.
 
 Every argument that takes a skin accepts a PNG path, a texture id or textures.minecraft.net URL, a
 UUID or a Minecraft username (looked up with the Mojang API, saved as skins/<name>.png), e.g.
@@ -415,11 +415,11 @@ def namemc_knob_pixels(rgba, unused_only=False, avoid=()):
     return sorted(pick, key=lambda p: (p[1], p[0])), elig
 
 
-def verify_namemc(base_rgba, found_path):
-    """FOUND hashes to its name under the NameMC formula, differs from BASE only in knob pixels
-    (alpha 0 -> 1 on overlay/unused pixels) and the watermark (RGB under alpha 0 on unused pixels)."""
+def verify_namemc(base_rgba, found_path, nk=NAMEMC_KNOBS, want=None):
+    """FOUND hashes to its name (or to WANT) under the NameMC formula, differs from BASE only in nk knob
+    pixels (alpha 0 -> 1 on overlay/unused pixels) and the watermark (RGB under alpha 0 on unused pixels)."""
     data = open(found_path, "rb").read()
-    want = os.path.splitext(os.path.basename(found_path))[0]
+    want = want or os.path.splitext(os.path.basename(found_path))[0]
     rgba = load_rgba(found_path)
     if namemc_id(rgba) != want:
         return False, "NameMC id of the file does not match its name"
@@ -441,8 +441,8 @@ def verify_namemc(base_rgba, found_path):
                 pass  # watermark: RGB under alpha 0 in the unused area
             else:
                 return False, f"unexpected change at ({x},{y})"
-    if knobs != NAMEMC_KNOBS:
-        return False, f"{knobs} knob pixels changed, expected {NAMEMC_KNOBS}"
+    if knobs != nk:
+        return False, f"{knobs} knob pixels changed, expected {nk}"
     moj = texture_id(data)
     return True, f"https://namemc.com/skin/{want}  mojang https://textures.minecraft.net/texture/{moj}"
 
@@ -689,6 +689,138 @@ def namemc_search(path, targets, count=1, every=False, engine="auto", unused_onl
         launch(search_args(targets, count, every, extra, bench), collect)
         return hits
     return list(run_targets(launch, targets, extra, outdir, NM_URL).values())
+
+
+# ---- NameMC collisions -------------------------------------------------------------------------
+# Mode A: a skin whose NameMC id equals one already in a list of known ids. Knobs: the last 2 pixels (62-63, 63),
+# alpha 1 + 48-bit counter as RGB, so one try is a single SHA-256 block. Mode B (--self): two skins of our own
+# with the same id; Pollard rho over 64 bits spread on the last 3 pixels (61-63, 63).
+COLLIDE_RE = re.compile(r"^\[\s*(\d+)s\] tried=(\d+)\s+rate=(\d+)/s \(avg (\d+)/s\)\s+(.*)$")
+DEFAULT_IDS = os.path.join(os.path.expanduser("~"), "Downloads", "namemc_skin_ids.u64le.bin")
+
+
+def collide_pixels(mode, v):
+    """(x, y, rgb24) of the knob pixels for counter v; must match namemccollide.cu."""
+    if mode == "A":
+        return [(62, 63, v & 0xFFFFFF), (63, 63, (v >> 24) & 0xFFFFFF)]
+    return [(61, 63, v & 0xFFFFFF), (62, 63, (v >> 24) & 0xFFFFFF), (63, 63, ((v >> 48) & 0xFFFF) << 8)]
+
+
+def collide_skin(base, mode, v):
+    rgba = bytearray(base)
+    for x, y, rgb in collide_pixels(mode, v):
+        i = (y * W + x) * 4
+        rgba[i:i + 4] = bytes((rgb >> 16 & 255, rgb >> 8 & 255, rgb & 255, 1))
+    return rgba
+
+
+def pretty_collide(line):
+    m = COLLIDE_RE.match(line)
+    if not m:
+        return pretty_progress(line)
+    secs, tried, rate, avg = (int(g) for g in m.groups()[:4])
+    h, rest = divmod(secs, 3600)
+    el = f"{h}:{rest // 60:02d}:{rest % 60:02d}"
+    return f"[{el:>9}] tried={tried:_}  rate={rate:_}/s (avg {avg:_}/s)  {m.group(5)}\n"
+
+
+def collide_search(path, ids_path, self_mode=False, out=None, watermark=True, seed=None, bench=False, count=1):
+    """Run namemccollide. Returns the verified result files (mode A: the skin; mode B: both skins)."""
+    global LAST_RATE
+    mode = "B" if self_mode else "A"
+    nk = 3 if self_mode else 2
+    gpuexe = exe("namemccollide")
+    if not os.path.exists(gpuexe):
+        sys.exit("namemccollide not found (build it with build.ps1; needs an NVIDIA GPU and nvcc)")
+    if mode == "A" and not os.path.exists(ids_path):
+        sys.exit(f"id list not found: {ids_path} (pass --ids; sorted uint64 little-endian)")
+    orig = load_rgba(path)
+    rgba = bytearray(orig)
+    wm = apply_watermark(rgba, avoid=MOJANG_TAIL) if watermark else []
+    base_mask, _ = masks()
+    knobs = [(W - nk + j, H - 1) for j in range(nk)]
+    for x, y in knobs:
+        if rgba[(y * W + x) * 4 + 3] or (x, y) in base_mask or (x, y) in RESERVED or (x, y) in wm:
+            sys.exit(f"knob pixel ({x},{y}) is not free in this skin (it must be transparent and invisible); "
+                     "the collision search needs the last pixels of the file")
+        i = (y * W + x) * 4
+        rgba[i:i + 4] = b"\x00\x00\x00\x01"
+    name = os.path.splitext(os.path.basename(path))[0]
+    outdir = out or os.path.join(HERE, "found", name + "_collide")
+    os.makedirs(outdir, exist_ok=True)
+    rgbap = os.path.join(outdir, "base.rgba")
+    with open(rgbap, "wb") as f:
+        f.write(rgba)
+    what = "self-collision (two own skins)" if self_mode else "match an id of " + ids_path
+    print(f"original NameMC id {namemc_id(orig)}; mode {mode}: {what}; knob pixels {knobs} (alpha 1)", flush=True)
+    cmd = [gpuexe, rgbap, "-m", mode] + ([ids_path] if mode == "A" else [])
+    cmd += ["-n", str(count)] + (["-S", str(seed)] if seed is not None else []) + (["-b"] if bench else [])
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    results = []
+    try:
+        for line in proc.stdout:
+            print(pretty_collide(line), end="", flush=True)
+            if line.startswith("RATE "):
+                LAST_RATE = float(line.split()[1])
+            elif line.startswith("HIT A "):
+                kv = dict(x.split("=", 1) for x in line.split()[2:])
+                results += collide_report_a(orig, rgba, outdir, kv["id"], int(kv["counter"]), ids_path)
+            elif line.startswith("COLLISION B "):
+                kv = dict(x.split("=", 1) for x in line.split()[2:])
+                results += collide_report_b(orig, rgba, outdir, kv["id"], int(kv["x"]), int(kv["y"]))
+        rc = proc.wait()
+    except KeyboardInterrupt:
+        proc.terminate()
+        proc.wait()
+        stopped()
+    if rc in INTERRUPT_CODES or rc & 0xFFFFFFFF in INTERRUPT_CODES:
+        stopped()
+    if rc:
+        sys.exit(f"namemccollide failed (rc={rc}; 5 = correctness gate failed, 6 = CUDA error)")
+    return results
+
+
+def collide_save(orig, base, outdir, mode, v, fname, want):
+    rgba = collide_skin(base, mode, v)
+    out = os.path.join(outdir, fname)
+    with open(out, "wb") as f:
+        f.write(mojang_png(rgba))
+    got = namemc_id(load_rgba(out))   # decoded back from the written PNG, hashed with the Python implementation
+    ok, msg = verify_namemc(orig, out, 2 if mode == "A" else 3, want)
+    return out, got, ok and got == want, msg
+
+
+def collide_report_a(orig, base, outdir, id16, counter, ids_path):
+    out, got, ok, msg = collide_save(orig, base, outdir, "A", counter, id16 + ".png", id16)
+    print("\n== result: NameMC id collision with an existing skin")
+    print(f"file          {out}")
+    print(f"new skin id   {got}  {NM_URL}{got}   (what the upload will have)")
+    print(f"existing id   {id16}  {NM_URL}{id16}   <- already on NameMC")
+    try:
+        import numpy as np
+        a = np.memmap(ids_path, dtype="<u8", mode="r")
+        v = np.uint64(int(id16, 16))
+        k = int(np.searchsorted(a, v))
+        inlist = k < len(a) and a[k] == v
+        print(f"list check    {'id is in the list at index ' + str(k) if inlist else 'NOT FOUND IN LIST'} (independent numpy lookup)")
+        ok = ok and inlist
+    except ImportError:
+        print("list check    skipped (numpy not installed); the finder already re-checked on the CPU")
+    print(f"verify        {'OK' if ok else 'FAIL'} {msg}", flush=True)
+    return [out] if ok else []
+
+
+def collide_report_b(orig, base, outdir, id16, x, y):
+    ra = collide_save(orig, base, outdir, "B", x, f"{id16}_a.png", id16)
+    rb = collide_save(orig, base, outdir, "B", y, f"{id16}_b.png", id16)
+    print("\n== result: two skins with the same NameMC id")
+    for tag, r in (("a", ra), ("b", rb)):
+        print(f"file {tag}        {r[0]}")
+        print(f"id {tag}          {r[1]}  {NM_URL}{r[1]}")
+    same = x != y and open(ra[0], "rb").read() != open(rb[0], "rb").read()
+    ok = ra[2] and rb[2] and ra[1] == rb[1] == id16 and same
+    print(f"verify        {'OK' if ok else 'FAIL'} both files decode to NameMC id {id16}; files differ: {same}", flush=True)
+    return [ra[0], rb[0]] if ok else []
 
 
 # ---- other commands ----------------------------------------------------------------------------
@@ -1064,6 +1196,13 @@ def cmd_namemc(args):
     return 0
 
 
+def cmd_collide(args):
+    args.skin = skin_path(args.skin)
+    res = collide_search(args.skin, args.ids, args.self_collision, args.out, not args.no_watermark, args.seed,
+                         args.bench, args.count)
+    return 0 if args.bench or res else 1
+
+
 def cmd_both(args):
     nm_t = targets_from(args.namemc_prefix, args.namemc_suffix, args.namemc_zeros)
     mj_t = targets_from(args.mojang_prefix, args.mojang_suffix, args.mojang_zeros)
@@ -1359,6 +1498,24 @@ def build_parser():
                    help="size of the fast-mode tail to check (default 6)")
     p.add_argument("--unused-only", action="store_true", help=argparse.SUPPRESS)  # old 'knobs' flag; both variants are shown
     p.set_defaults(func=cmd_pixels)
+
+    p = command("collide", "Find a skin whose NameMC id equals an id NameMC already has (or two own skins with one id).",
+                "  py skinhash.py collide skins/me.png --ids namemc_skin_ids.u64le.bin\n"
+                "  py skinhash.py collide skins/me.png --self")
+    add_skin(p)
+    g = p.add_argument_group("Mode")
+    g.add_argument("--ids", metavar="FILE", default=DEFAULT_IDS,
+                   help="sorted unique uint64 little-endian list of known NameMC ids (default ~/Downloads/namemc_skin_ids.u64le.bin). "
+                   "Every candidate is checked against it on the GPU.")
+    g.add_argument("--self", dest="self_collision", action="store_true",
+                   help="instead find two different skins of your own with the same id (~2^32 steps, Pollard rho)")
+    g.add_argument("-n", "--count", metavar="N", type=int_range(1), default=1, help="stop after N hits (list mode; default 1)")
+    g.add_argument("--bench", action="store_true", help="10 s benchmark of the list mode, saves nothing")
+    g.add_argument("--no-watermark", action="store_true", help="do not add the invisible skinhash watermark")
+    add_output(p, "found/<skin>_collide/")
+    g = p.add_argument_group("Advanced")
+    g.add_argument("--seed", metavar="N", type=int_range(0), help="start seed (default: random)")
+    p.set_defaults(func=cmd_collide)
 
     p = command("bench", "Run the 10 s benchmark of the search engines and print candidates per second. Saves nothing.",
                 "  py skinhash.py bench\n"

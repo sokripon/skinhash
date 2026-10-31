@@ -121,6 +121,23 @@ Output goes to `found/<skin>_namemc/`. `--engine auto` uses `namemcgpu` if built
 `-z N` means N leading zero digits of the 16-digit id. `--engine generic`, `--no-generic` and `--tail-pixels`
 do not exist here. See "NameMC mode" below.
 
+### collide
+
+Find a skin whose NameMC id equals an id NameMC already has, or two skins of yours that share one. NVIDIA GPU only
+(`namemccollide`, built by `build.ps1`).
+
+```
+py skinhash.py collide skins/me.png --ids namemc_skin_ids.u64le.bin   # match any id of a sorted uint64-LE list
+py skinhash.py collide skins/me.png --self                            # two own skins with the same id
+```
+
+The knobs are the last pixels of the file (alpha 1, RGB = counter; transparent overlay pixels, invisible). List mode
+uses (62-63, 63), so one try is a single SHA-256 block from a midstate: about 3.2 G tries/s on an RTX 5060 Ti, with a
+32 MB bitmap prefilter and an exact bucket lookup in the 51M-id list (expected ~3.6e11 tries, about 2 minutes).
+`--self` uses (61-63, 63) and Pollard rho with distinguished points (~2^32 steps, seconds, only the trail ends are
+stored). Every hit is re-hashed on the CPU, written as a PNG, decoded back and re-hashed in Python.
+Output goes to `found/<skin>_collide/`.
+
 ### both
 
 ```

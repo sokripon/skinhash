@@ -48,7 +48,6 @@ button:disabled { opacity: .45; cursor: default; }
 #hits .why { color: var(--muted); font-size: .8rem; margin: 2px 0 6px; }
 #hits .btns { display: flex; gap: 8px; flex-wrap: wrap; }
 #hits .btns button, #hits .btns a.dl { padding: 5px 12px; font-size: .9rem; text-decoration: none; color: var(--fg); border: 1px solid var(--line); border-radius: 8px; background: var(--card); }
-.notes ul { padding-left: 20px; color: var(--muted); font-size: .92rem; }
 @media (max-width: 480px) { main { padding: 12px; } dl { grid-template-columns: 1fr; } dt { margin-top: 6px; } }
 #hits .kind { font-size: .75rem; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
 #hits a.link.m { display: block; margin-bottom: 6px; }

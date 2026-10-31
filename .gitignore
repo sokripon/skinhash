@@ -1,0 +1,16 @@
+# build outputs (rebuild with build.ps1)
+*.exe
+*.exp
+*.lib
+*.obj
+*.pdb
+*.o
+
+# Python
+__pycache__/
+*.pyc
+
+# search output: hits, raw scanline dumps, GPU job files
+found/
+*.raw
+*.job

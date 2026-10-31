@@ -187,7 +187,7 @@ function addNmHit(r, whys, intermediate = false) {
   li.innerHTML = `<div class="kind">NameMC skin page${intermediate ? " (intermediate result of phase 1)" : ""}</div><a class="link" target="_blank" rel="noopener"></a><div class="why"></div><div class="kind">Mojang texture link of this PNG</div><a class="link m" target="_blank" rel="noopener"></a><div class="btns"><button type="button" class="copy">Copy link</button><a class="dl">Download PNG</a><button type="button" class="use">Use as skin for a Mojang search</button></div>`;
   const a = li.querySelector("a.link"); a.href = url; a.textContent = url;
   const m = li.querySelector("a.m"); m.href = murl; m.textContent = murl;
-  li.querySelector(".why").textContent = `${whys.map((t) => `${t.kind} ${t.text}`).join(", ")} | verified | ${r.png.length} bytes. Whether NameMC keeps leading zeros of the id in its URL is unverified.`;
+  li.querySelector(".why").textContent = `${whys.map((t) => `${t.kind} ${t.text}`).join(", ")} | verified | ${r.png.length} bytes.`;
   const dl = li.querySelector("a.dl"); dl.href = blobUrl; dl.download = `${r.id16}.png`;
   li.querySelector(".copy").addEventListener("click", async (e) => {
     try { await navigator.clipboard.writeText(url); e.target.textContent = "Copied"; } catch { e.target.textContent = "Copy failed"; }
@@ -545,7 +545,7 @@ function addBothHit(r1, r2, v) {
   li.innerHTML = `<div class="kind">Final result: NameMC skin page + Mojang texture link in one PNG</div><a class="link n" target="_blank" rel="noopener"></a><a class="link m" target="_blank" rel="noopener"></a><div class="why"></div><div class="btns"><button type="button" class="copy">Copy both links</button><a class="dl">Download PNG</a></div>`;
   const an = li.querySelector("a.n"); an.href = nurl; an.textContent = nurl;
   const am = li.querySelector("a.m"); am.href = murl; am.textContent = murl;
-  li.querySelector(".why").textContent = `NameMC ${[...new Set(v.nmWhys.map((t) => `${t.kind} ${t.text}`))].join(", ")} | Mojang ${[...new Set(r2.whys.map((t) => `${t.kind} ${t.text}`))].join(", ")} | verified against your original | ${r2.png.length} bytes. Whether NameMC keeps leading zeros of the id in its URL is unverified.`;
+  li.querySelector(".why").textContent = `NameMC ${[...new Set(v.nmWhys.map((t) => `${t.kind} ${t.text}`))].join(", ")} | Mojang ${[...new Set(r2.whys.map((t) => `${t.kind} ${t.text}`))].join(", ")} | verified against your original | ${r2.png.length} bytes.`;
   const dl = li.querySelector("a.dl"); dl.href = blobUrl; dl.download = `${r2.id}.png`;
   li.querySelector(".copy").addEventListener("click", async (e) => {
     try { await navigator.clipboard.writeText(`${nurl}\n${murl}`); e.target.textContent = "Copied"; } catch { e.target.textContent = "Copy failed"; }

@@ -207,8 +207,8 @@ py skinhash.py namemc skins/me.png --gpu -p beef -n 1
 py skinhash.py search found/me_namemc/<id>.png --gpu -p cafe -n 1
 ```
 
-Unverified: whether NameMC shows or accepts ids with leading zeros as 16 digits. The tool treats the id as
-fixed width and matches prefixes on that.
+NameMC shows the id as a fixed 16 digits, leading zeros included (checked with `namemc.com/skin/00000000001d91b1`).
+The tool matches prefixes on those 16 digits, so `-z N` gives a NameMC link starting with N zeros.
 
 ## Watermark
 

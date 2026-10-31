@@ -147,7 +147,7 @@ Example result, made from `skins/steve.png` in the web page's Both mode and uplo
 
 - Mojang: `textures.minecraft.net/texture/7848d1fb944bf2b37a597632fc8e1abbd495a440e3f699b9124165`
   (10 leading zeros, 54-character id)
-- NameMC: `namemc.com/skin/00000000001d91b1` (10 leading zeros; whether NameMC's URL keeps the zeros is unverified)
+- NameMC: `namemc.com/skin/00000000001d91b1` (10 leading zeros, shown in the URL)
 
 The served file is byte-identical to the downloaded PNG. It differs from Steve in 15 invisible pixels: the watermark,
 3 NameMC pixels (alpha 0 → 1) and 6 Mojang search pixels (hidden RGB under alpha 0).
@@ -196,5 +196,5 @@ one-block layout of GPU fast mode, which then runs at about 2.1 G/s instead of 3
 A pure SHA-256 kernel on this GPU does ~4.5G one-block hashes/s, so the 2-block default is near what the
 hardware allows.
 
-**Unverified.** NameMC's handling of ids with leading zeros (whether the URL shows 16 digits or trims them).
-The tool matches on the fixed 16-digit id.
+NameMC's URL shows all 16 digits, leading zeros included (checked with `namemc.com/skin/00000000001d91b1`).
+The tool matches on that fixed 16-digit id.

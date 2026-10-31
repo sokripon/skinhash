@@ -32,8 +32,8 @@ The mode selector switches between the Mojang texture link and the NameMC skin p
 alpha = 0); no PNG or zlib is involved in the id. The knob is three fully transparent overlay (or, with
 "unused pixels only", unused) pixels that get alpha 1 and a 64-bit counter as RGB: (55-57, 63) by default, which
 leaves the Mojang fast-mode tail free. Prefixes are matched on the fixed 16 digits (a leading 0 is allowed).
-Whether NameMC keeps leading zeros of the id in its URL is unverified. Alpha 1 of 255 should be invisible in
-game; that is not verified either.
+NameMC's URL shows all 16 digits, leading zeros included. Alpha 1 of 255 should be invisible in game; that
+is not verified yet.
 
 | Web | Native |
 |---|---|

@@ -218,16 +218,34 @@ LAST_RATE = None      # candidates/s from the last RATE line (benchmark)
 GPU_FAILED = False    # the GPU search fell back to the CPU
 
 
+PROGRESS_RE = re.compile(r"^\[\s*(\d+)s\] tried=(\d+)\s+rate=(\d+)/s \(avg (\d+)/s\)\s+hits=(\d+)\s+best_zeros=(\d+)")
+
+
+def pretty_progress(line):
+    """Make the finders' progress/done lines readable: 141_180_272_640, elapsed as h:mm:ss."""
+    m = PROGRESS_RE.match(line)
+    if m:
+        secs, tried, rate, avg, hits, best = (int(g) for g in m.groups())
+        h, rest = divmod(secs, 3600)
+        el = f"{h}:{rest // 60:02d}:{rest % 60:02d}"
+        return (f"[{el:>9}] tried={tried:_}  rate={rate:_}/s (avg {avg:_}/s)  "
+                f"hits={hits}  best_zeros={best}\n")
+    if line.startswith("done:"):
+        return re.sub(r"\d{5,}", lambda d: f"{int(d.group()):_}", line)
+    return line
+
+
 def run_finder(cmd, rgba, on_hit=None, verifier=None):
     """Run a finder and verify its hits. Ctrl+C ends the whole search, never a fallback.
     If on_hit(why, path) returns True the finder is stopped; the rest of its output is
     still verified and STOPPED_BY_US is returned."""
     global LAST_ROLLOVER, LAST_RATE
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, text=True)
+    # stderr (progress lines) is merged in so it can be reformatted
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     asked_stop = False
     try:
         for line in proc.stdout:
-            print(line, end="", flush=True)
+            print(pretty_progress(line), end="", flush=True)
             if line.startswith("RATE "):
                 try:
                     LAST_RATE = float(line.split()[1])

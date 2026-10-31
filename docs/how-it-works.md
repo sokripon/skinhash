@@ -143,6 +143,15 @@ Each extra leading zero takes 16× longer on average:
 
 In a ~64M-skin archive the shortest real skin link has 8 leading zeros, so 9 or more is a new record.
 
+Example result, made from `skins/steve.png` in the web page's Both mode and uploaded:
+
+- Mojang: `textures.minecraft.net/texture/7848d1fb944bf2b37a597632fc8e1abbd495a440e3f699b9124165`
+  (10 leading zeros, 54-character id)
+- NameMC: `namemc.com/skin/00000000001d91b1` (10 leading zeros; whether NameMC's URL keeps the zeros is unverified)
+
+The served file is byte-identical to the downloaded PNG. It differs from Steve in 15 invisible pixels: the watermark,
+3 NameMC pixels (alpha 0 → 1) and 6 Mojang search pixels (hidden RGB under alpha 0).
+
 `pixel-map.svg` is generated from the same layout tables the tool uses: `py docs/make_pixel_map.py`.
 
 ## 6. NameMC ids

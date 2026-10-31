@@ -53,9 +53,9 @@
 
   <rect x="24" y="200" width="892" height="80" rx="10" fill="#f7f7f5"/>
   <text x="44" y="226" font-size="12.5" fill="#555">SHA-256</text>
-  <text x="120" y="226" font-size="13.5" font-family="Consolas, Menlo, monospace" fill="#1d1d1f"><tspan fill="#e5484d" font-weight="700">000000000</tspan>7c41e2d95b0a38f6e1c97d24a85f3b6e0d19c472fa8e65b3d01f9c4</text>
+  <text x="120" y="226" font-size="13.5" font-family="Consolas, Menlo, monospace" fill="#1d1d1f"><tspan fill="#e5484d" font-weight="700">0000000000</tspan>7848d1fb944bf2b37a597632fc8e1abbd495a440e3f699b9124165</text>
   <text x="44" y="258" font-size="12.5" fill="#555">Link</text>
-  <text x="120" y="258" font-size="13.5" font-family="Consolas, Menlo, monospace" fill="#1d1d1f">textures.minecraft.net/texture/7c41e2d95b0a38f6e1c97d24a85f3b6e0d19c472fa8e65b3d01f9c4</text>
-  <text x="896" y="226" font-size="11.5" text-anchor="end" fill="#c0282d">9 zeros (example)</text>
-  <text x="896" y="258" font-size="11.5" text-anchor="end" fill="#c0282d">55-char id</text>
+  <text x="120" y="258" font-size="13.5" font-family="Consolas, Menlo, monospace" fill="#1d1d1f">textures.minecraft.net/texture/7848d1fb944bf2b37a597632fc8e1abbd495a440e3f699b9124165</text>
+  <text x="896" y="226" font-size="11.5" text-anchor="end" fill="#c0282d">10 zeros</text>
+  <text x="896" y="258" font-size="11.5" text-anchor="end" fill="#c0282d">54-char id</text>
 </svg>

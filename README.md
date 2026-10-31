@@ -2,6 +2,8 @@
 
 Finds a "cool looking" Minecraft skin texture id by brute-forcing pixels that are invisible in game.
 
+**Try it in your browser: https://sokripon.github.io/skinhash/** (WebGPU, runs locally, nothing is uploaded)
+
 [How it works](docs/how-it-works.md) · [Optimization log](docs/optimizations.md) · [Browser version](web/README.md) · [Skin areas map](docs/skin-areas.png)
 
 It finds Mojang texture links (`textures.minecraft.net/texture/…`) and NameMC skin pages (`namemc.com/skin/…`), or both on one skin. It runs natively (CPU, CUDA) or in the browser (WebGPU). The example skin is classic Steve, `skins/steve.png`.

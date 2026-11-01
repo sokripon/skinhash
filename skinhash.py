@@ -281,12 +281,12 @@ def target_args(targets):
     out = []
     for t in targets:
         kind, val = t.split(":", 1)
-        out += [{"prefix": "-p", "suffix": "-s", "zeros": "-z"}[kind], val]
+        out += [{"prefix": "-p", "suffix": "-s", "zeros": "-z", "contains": "-c"}[kind], val]
     return out
 
 
 def hit_target(why, targets):
-    """The remaining target satisfied by a finder 'why' such as prefix:cafe or zeros:9."""
+    """The remaining target satisfied by a finder 'why' such as prefix:cafe, contains:beef or zeros:9."""
     kind, val = why.split(":", 1)
     for t in targets:
         tk, tv = t.split(":", 1)
@@ -547,13 +547,16 @@ def px_state(rgba, p):
 
 
 def target_match(t, shown, full):
-    """Does an id satisfy target 'prefix:x' / 'suffix:x' / 'zeros:N'? shown = id as in the link,
-    full = untrimmed hex digest."""
+    """Does an id satisfy target 'prefix:x' / 'suffix:x' / 'contains:x' / 'zeros:N'? shown = id as in the
+    link (leading zeros dropped; a NameMC id is its 16 digits), full = untrimmed hex digest. A contains
+    match must lie in the shown id: digits that only match inside the dropped zeros do not count."""
     kind, val = t.split(":", 1)
     if kind == "prefix":
         return shown.startswith(val)
     if kind == "suffix":
         return shown.endswith(val)
+    if kind == "contains":
+        return val in shown
     return len(full) - len(full.lstrip("0")) >= int(val)
 
 
@@ -1225,13 +1228,13 @@ def cmd_bench(args):
     return 0
 
 
-def targets_from(prefix, suffix, zeros):
+def targets_from(prefix, suffix, zeros, contains=None):
     return ([f"prefix:{p}" for p in prefix or []] + [f"suffix:{s}" for s in suffix or []]
-            + [f"zeros:{z}" for z in zeros or []])
+            + [f"zeros:{z}" for z in zeros or []] + [f"contains:{c}" for c in contains or []])
 
 
 def check_search_options(parser, args, has_target,
-                         hint="use -p/--prefix, -s/--suffix or -z/--zeros"):
+                         hint="use -p/--prefix, -s/--suffix, -c/--contains or -z/--zeros"):
     if not has_target:
         parser.error("no target given: " + hint)
     if getattr(args, "no_generic", False) and args.engine == "generic":
@@ -1248,7 +1251,7 @@ def default_out(args, suffix=""):
 
 
 def cmd_mojang(args):
-    targets = targets_from(args.prefix, args.suffix, args.zeros)
+    targets = targets_from(args.prefix, args.suffix, args.zeros, args.contains)
     check_search_options(args.parser, args, bool(targets))
     args.skin = skin_path(args.skin)
     mojang_search(args.skin, targets, args.count, args.every_target, args.engine, args.no_generic,
@@ -1258,7 +1261,7 @@ def cmd_mojang(args):
 
 
 def cmd_namemc(args):
-    targets = targets_from(args.prefix, args.suffix, args.zeros)
+    targets = targets_from(args.prefix, args.suffix, args.zeros, args.contains)
     check_search_options(args.parser, args, bool(targets))
     args.skin = skin_path(args.skin)
     namemc_search(args.skin, targets, args.count, args.every_target, args.engine, args.unused_only,
@@ -1274,10 +1277,10 @@ def cmd_collide(args):
 
 
 def cmd_both(args):
-    nm_t = targets_from(args.namemc_prefix, args.namemc_suffix, args.namemc_zeros)
-    mj_t = targets_from(args.mojang_prefix, args.mojang_suffix, args.mojang_zeros)
+    nm_t = targets_from(args.namemc_prefix, args.namemc_suffix, args.namemc_zeros, args.namemc_contains)
+    mj_t = targets_from(args.mojang_prefix, args.mojang_suffix, args.mojang_zeros, args.mojang_contains)
     check_search_options(args.parser, args, bool(nm_t or mj_t),
-                         "use --namemc-prefix/-suffix/-zeros and/or --mojang-prefix/-suffix/-zeros")
+                         "use --namemc-prefix/-suffix/-contains/-zeros and/or --mojang-prefix/-suffix/-contains/-zeros")
     args.skin = skin_path(args.skin)
     outdir = default_out(args, "_both")
     orig = load_rgba(args.skin)
@@ -1410,6 +1413,10 @@ def add_targets(p, kind):
                        help="at least N leading zero digits of the 16-digit id. Repeatable.")
     g.add_argument("-s", "--suffix", metavar="HEX", type=hex_arg, action="append",
                    help="id ends with HEX (up to 16 digits). Repeatable.")
+    g.add_argument("-c", "--contains", metavar="HEX", type=hex_arg, action="append",
+                   help=("HEX occurs anywhere in the link id (leading zeros dropped; up to 16 digits, may start with 0). Repeatable."
+                         if kind == "mojang" else
+                         "HEX occurs anywhere in the 16-digit id (up to 16 digits, may start with 0). Repeatable."))
 
 
 def add_stopping(p, both=False):
@@ -1492,6 +1499,7 @@ def build_parser():
                 "  py skinhash.py mojang skins/steve.png -p c0ffee\n"
                 "  py skinhash.py mojang skins/steve.png -z 9 -n 3 -o out/steve\n"
                 "  py skinhash.py mojang skins/steve.png -s dead --engine cpu --no-generic\n"
+                "  py skinhash.py mojang skins/steve.png -c beef -n 3     (beef anywhere in the link id)\n"
                 "  py skinhash.py mojang jeb_ -p c0ffee            (username; also a UUID or texture id)")
     add_skin(p)
     add_targets(p, "mojang")
@@ -1521,16 +1529,19 @@ def build_parser():
     p = command("both", "Search for a NameMC id and a Mojang texture id on one skin: NameMC first, then Mojang on that hit.",
                 "  py skinhash.py both skins/steve.png --namemc-prefix beef --mojang-prefix cafe\n"
                 "  py skinhash.py both skins/steve.png --namemc-zeros 6 --mojang-zeros 9\n"
+                "  py skinhash.py both skins/steve.png --namemc-contains bee --mojang-contains cafe\n"
                 "  py skinhash.py both skins/steve.png --mojang-prefix c0ffee     (only the Mojang phase)\n"
                 "  py skinhash.py both jeb_ --namemc-prefix beef --mojang-prefix cafe")
     add_skin(p)
     g = p.add_argument_group("NameMC targets (phase 1; fixed 16 digits, prefixes may start with 0)")
     g.add_argument("--namemc-prefix", metavar="HEX", type=hex_arg, action="append", help="NameMC id starts with HEX. Repeatable.")
     g.add_argument("--namemc-suffix", metavar="HEX", type=hex_arg, action="append", help="NameMC id ends with HEX. Repeatable.")
+    g.add_argument("--namemc-contains", metavar="HEX", type=hex_arg, action="append", help="HEX occurs anywhere in the 16-digit NameMC id. Repeatable.")
     g.add_argument("--namemc-zeros", metavar="N", type=int_range(1, 16), action="append", help="at least N leading zero digits. Repeatable.")
     g = p.add_argument_group("Mojang targets (phase 2; run on the phase 1 hit)")
     g.add_argument("--mojang-prefix", metavar="HEX", type=mojang_hex, action="append", help="link id starts with HEX (may not start with 0: use --mojang-zeros). Repeatable.")
     g.add_argument("--mojang-suffix", metavar="HEX", type=hex_arg, action="append", help="link id ends with HEX. Repeatable.")
+    g.add_argument("--mojang-contains", metavar="HEX", type=hex_arg, action="append", help="HEX occurs anywhere in the link id (leading zeros dropped). Repeatable.")
     g.add_argument("--mojang-zeros", metavar="N", type=int_range(1, 64), action="append", help="at least N leading zero digits. Repeatable.")
     add_stopping(p, both=True)
     add_engine(p, "both")

@@ -1,6 +1,6 @@
 """Independent check of a NameMC hit written by the web page (Pillow + hashlib).
-usage: py namemc_check.py BASE.png HIT.png PREFIX [--unused-only] [--mojang-knobs] [--id EXPECTED_ID16]
-Checks: NameMC id of HIT equals its filename and starts with PREFIX; only three knob pixels (alpha 0 -> 1, never
+usage: py namemc_check.py BASE.png HIT.png PREFIX|contains:HEX [--unused-only] [--mojang-knobs] [--id EXPECTED_ID16]
+Checks: NameMC id of HIT equals its filename and starts with PREFIX (or contains HEX anywhere in its 16 digits); only three knob pixels (alpha 0 -> 1, never
 base layer) and the watermark (alpha 0 -> 0, unused area) differ from BASE. Prints OK or FAIL and the reason."""
 import hashlib, os, struct, sys
 from PIL import Image
@@ -29,7 +29,9 @@ want = sys.argv[sys.argv.index("--id") + 1] if "--id" in sys.argv else os.path.s
 mojang_knobs = "--mojang-knobs" in sys.argv   # Both mode: hidden RGB under alpha 0 may also change on overlay pixels
 got = nm_id(hit)
 if got != want: fail(f"NameMC id {got} != filename {want}")
-if not got.startswith(prefix): fail(f"id {got} does not start with {prefix}")
+if prefix.startswith("contains:"):
+    if prefix[9:] not in got: fail(f"id {got} does not contain {prefix[9:]}")
+elif not got.startswith(prefix): fail(f"id {got} does not start with {prefix}")
 masks_base, masks_over = skinhash.masks()
 knobs = 0
 for y in range(64):

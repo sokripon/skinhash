@@ -1,5 +1,5 @@
 // WebGPU runner: device setup, correctness gate, pipelined search loop.
-import { deriveJob, buildConsts, genShader, MAXHITS, MAXPAT, HITS_WORDS, NTEST_STRIDE } from "./wgsl.js";
+import { deriveJob, buildConsts, genShader, MAXHITS, MAXPAT, MAXCONT, CB, PT_WORDS, HITS_WORDS, NTEST_STRIDE } from "./wgsl.js";
 import { deriveFast, buildFastConsts, genFastShader } from "./wgslfast.js";
 import { RIN, NPERM, permCount, outerDigits } from "./job.js";
 
@@ -49,7 +49,7 @@ async function compilePipelines(d, code) {
 }
 
 export class GpuJob {
-  constructor(device, job, { wg = 256, kernel = "auto" } = {}) {
+  constructor(device, job, { wg = 256, kernel = "auto", contains = false } = {}) {
     this.device = device; this.job = job; this.wg = wg;
     this.D = deriveJob(job);
     this.kernel = "generic"; this.whyGeneric = kernel === "generic" ? "forced" : "";
@@ -59,16 +59,16 @@ export class GpuJob {
         this.F = F; this.kernel = "fast";
         const { buf, off } = buildFastConsts(this.D, F);
         this.consts = buf;
-        this.wgsl = genFastShader(job, this.D, F, off, wg);
+        this.wgsl = genFastShader(job, this.D, F, off, wg, contains);
       } else this.whyGeneric = F.why;
     }
     if (this.kernel === "generic") {
       const { off, buf } = buildConsts(this.D, job.nblk);
       this.consts = buf;
-      this.wgsl = genShader(this.D, off, wg, job.tests.length);
+      this.wgsl = genShader(this.D, off, wg, job.tests.length, contains);
     }
     this.nTests = job.tests.length;
-    this.pats = []; this.zeros = 0;
+    this.pats = []; this.zeros = 0; this.cont = []; this.hasContains = contains;
   }
 
   async build() {
@@ -79,8 +79,8 @@ export class GpuJob {
     this.dummy = mk(64, U.STORAGE);   // the fast kernel's shared code path binds all five buffers in both entry points
     this.kbuf = mk(this.consts.byteLength, U.STORAGE | U.COPY_DST);
     d.queue.writeBuffer(this.kbuf, 0, this.consts);
-    this.ptbuf = mk((2 + 5 * MAXPAT) * 4, U.STORAGE | U.COPY_DST);
-    this.setTargets(this.pats, this.zeros);
+    this.ptbuf = mk(PT_WORDS * 4, U.STORAGE | U.COPY_DST);
+    this.setTargets(this.pats, this.zeros, this.cont);
     this.slots = [0, 1].map(() => {
       const dp = mk(20 * 4, U.STORAGE | U.COPY_DST);
       const hits = mk(HITS_WORDS * 4, U.STORAGE | U.COPY_SRC | U.COPY_DST);
@@ -93,12 +93,15 @@ export class GpuJob {
     });
   }
 
-  /** pats: [{vh, vl, mh, ml, suffix}] */
-  setTargets(pats, zeros) {
-    this.pats = pats; this.zeros = zeros;
-    const a = new Uint32Array(2 + 5 * MAXPAT);
+  /** pats: [{vh, vl, mh, ml, suffix}], cont: [{p1, m1, p2, m2, lim}] (only used if the kernel was built with contains) */
+  setTargets(pats, zeros, cont = []) {
+    if (cont.length && !this.hasContains) throw new Error("this kernel was built without contains support");
+    this.pats = pats; this.zeros = zeros; this.cont = cont;
+    const a = new Uint32Array(PT_WORDS);
     a[0] = Math.min(pats.length, MAXPAT); a[1] = zeros;
     pats.slice(0, MAXPAT).forEach((p, i) => a.set([p.vh, p.vl, p.mh, p.ml, p.suffix ? 1 : 0], 2 + 5 * i));
+    a[CB] = Math.min(cont.length, MAXCONT);
+    cont.slice(0, MAXCONT).forEach((c, i) => a.set([c.p1, c.m1, c.p2, c.m2, c.lim], CB + 1 + 5 * i));
     this.device.queue.writeBuffer(this.ptbuf, 0, a);
   }
 

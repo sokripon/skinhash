@@ -321,6 +321,30 @@ in gpufinder, which is itself compared with the CPU vectors. If the fast kernel 
 says so, switches to the generic kernel, repeats the gate, and exits with code 5 only if that fails too. Hits are
 re-hashed on the CPU as before.
 
+### Cost of the contains target
+
+`--contains HEX` (a hex string anywhere in the id) is checked on every candidate that no prefix, suffix or zeros
+target already took. Per nibble offset the kernels build a 32-bit window of the digest with one funnel shift, mask and
+compare it with the first 8 pattern digits (one LOP3), and fold the 64 results with `min`; the other 8 digits and the
+range test (offset at or after the leading zeros, so a match inside the dropped zeros does not count) only run when
+a window matched. That is about 3 instructions per offset, ~190 per pattern on top of ~1500 for the candidate, and
+the kernels are compiled without it (a template flag; WGSL: no generated code) when no contains pattern is given, so
+the other targets run exactly as fast as before (0.99-1.01 against the build before the change, alternating runs).
+Measured with alternating runs while another search shared the GPU, as the ratio to the same build without
+`--contains` (the absolute rates were about half of the idle 4.8 / 3.1 G/s):
+
+| Kernel | 1 pattern | 4 patterns |
+|---|---|---|
+| Mojang fast, CUDA | 0.87 | 0.65 |
+| NameMC fast, CUDA (16 offsets) | 0.975 | 0.90 |
+| Mojang fast, WGSL in Chrome | 0.89 | 0.69 |
+
+The cost does not depend on the pattern length. Tried and dropped: a byte-aligned prefilter (a zero-byte test of the
+digest xor the two byte values that a pattern of 3+ digits must contain at an even or an odd offset, 3 instructions per
+word and value). About a quarter of the digests pass it, so almost every warp still runs the full check and the net
+result was slower (0.84-0.85 against 0.87). Replacing the per-offset branch by the `min` fold made no measurable
+difference (0.86-0.87 either way).
+
 ## Rejected ideas
 
 | Idea | Why not |
@@ -329,7 +353,7 @@ re-hashed on the CPU as before.
 | zlib on the GPU | It would have to match stock zlib level 4 bit for bit. Fast mode makes it unnecessary. |
 | SHA-256 midstate in the generic search | The IDAT length near the start of the file changes with the compressed size. |
 | Changing any alpha-0 pixel | Minecraft forces the base layer opaque, so hidden colours there would show. Only transparent overlay and unused pixels are safe. |
-| Pattern matching on the full 64-digit hash | The link drops leading zeros. `-p` matches the trimmed id, so `-p c0ffee` also catches `000c0ffee…`. |
+| Pattern matching on the full 64-digit hash | The link drops leading zeros. `-p` matches the trimmed id, so `-p c0ffee` also catches `000c0ffee…`. (`-c` does the same: the kernels skip matches inside the dropped zeros, and the host re-checks the trimmed id.) |
 
 ## Correctness checks
 

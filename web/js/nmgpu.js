@@ -5,7 +5,10 @@
 //  general: any layout (e.g. "unused pixels only", ~50 blocks), one candidate per thread; per-block tables
 //           live in a storage buffer.
 import { K256 } from "./hash.js";
-import { MAXHITS, MAXPAT, HITS_WORDS } from "./wgsl.js";
+import { MAXHITS, MAXPAT, MAXCONT, HITS_WORDS, containsCode } from "./wgsl.js";
+
+const NM_CB = 3 + 4 * MAXPAT;                 // contains table in PT: count, then p1 m1 p2 m2 lim per pattern
+const NM_PT_WORDS = NM_CB + 1 + 5 * MAXCONT;
 
 const INNER = 1024;
 const hex = (v) => `0x${(v >>> 0).toString(16)}u`;
@@ -141,7 +144,7 @@ export function nmDerive(prep) {
   return { img, kw, isc, pblk, pwd };
 }
 
-export function genNmShader(prep, wg = 256, nTests = 96) {
+export function genNmShader(prep, wg = 256, nTests = 96, contains = false) {
   const D = nmDerive(prep), fast = prep.fast, nb = prep.nb;
   const mid = Array.from(prep.mid).map((x, i) => `var s${i} = ${hex(x)};`).join(" ");
   const off = { IMG: 0, KW: nb * 16, ISC: nb * 80, PBLK: nb * 81, PWD: nb * 81 + 3 };
@@ -161,7 +164,8 @@ fn is_hit(s0: u32, s1: u32) -> bool {
     let pb = 3u + 4u * i;
     if ((s0 & PT[pb + 2u]) == PT[pb] && (s1 & PT[pb + 3u]) == PT[pb + 1u]) { return true; }
   }
-  return false;
+${contains ? `  var hit = false;
+${containsCode({ words: ["s0", "s1"], cb: NM_CB, zl: "0u" })}  return hit;` : "  return false;"}
 }
 fn record(lo: u32, hi: u32) {
   let pos = atomicAdd(&HITS[0], 1u);
@@ -247,13 +251,13 @@ ${FP.body}
 const U = GPUBufferUsage;
 
 export class NmGpuJob {
-  constructor(device, prep, tests, { wg = 256 } = {}) {
+  constructor(device, prep, tests, { wg = 256, contains = false } = {}) {
     this.device = device; this.prep = prep; this.tests = tests; this.wg = wg;
-    const g = genNmShader(prep, wg, tests.length);
+    const g = genNmShader(prep, wg, tests.length, contains);
     this.wgsl = g.wgsl; this.D = g.D; this.off = g.off;
     this.per = prep.fast ? INNER : 1;
     this.maxThreads = prep.fast ? 1 << 19 : 1 << 23;
-    this.cfg = { pats: [], zmode: 0, zthr: 0 };
+    this.cfg = { pats: [], cont: [], zmode: 0, zthr: 0 }; this.hasContains = contains;
   }
 
   async build() {
@@ -278,7 +282,7 @@ export class NmGpuJob {
       this.kbuf = mk(a.byteLength, U.STORAGE | U.COPY_DST);
       d.queue.writeBuffer(this.kbuf, 0, a);
     }
-    this.ptbuf = mk((3 + 4 * MAXPAT) * 4, U.STORAGE | U.COPY_DST);
+    this.ptbuf = mk(NM_PT_WORDS * 4, U.STORAGE | U.COPY_DST);
     this.setTargets(this.cfg);
     const entries = (extra) => [...(prep.fast ? [] : [{ binding: 0, resource: { buffer: this.kbuf } }]), ...extra];
     this.entries = entries;
@@ -292,12 +296,16 @@ export class NmGpuJob {
     });
   }
 
-  /** cfg = {pats, zmode, zthr} from gpuNmTargets */
+  /** cfg = {pats, cont, zmode, zthr} from gpuNmTargets */
   setTargets(cfg) {
+    if (cfg.cont?.length && !this.hasContains) throw new Error("this kernel was built without contains support");
     this.cfg = cfg;
-    const a = new Uint32Array(3 + 4 * MAXPAT);
+    const a = new Uint32Array(NM_PT_WORDS);
     a[0] = Math.min(cfg.pats.length, MAXPAT); a[1] = cfg.zmode; a[2] = cfg.zthr >>> 0;
     cfg.pats.slice(0, MAXPAT).forEach((p, i) => a.set([p.vh, p.vl, p.mh, p.ml], 3 + 4 * i));
+    const cont = cfg.cont || [];
+    a[NM_CB] = Math.min(cont.length, MAXCONT);
+    cont.slice(0, MAXCONT).forEach((c, i) => a.set([c.p1, c.m1, c.p2, c.m2, c.lim], NM_CB + 1 + 5 * i));
     this.device.queue.writeBuffer(this.ptbuf, 0, a);
   }
 

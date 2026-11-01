@@ -1,8 +1,10 @@
 # skinhash in the browser (WebGPU)
 
 A static web page version of the native tool: drop your own 64x64 Minecraft skin, pick targets (hex prefix,
-suffix, leading zeros) and it searches invisible variations of the skin on your GPU. No build step, no server
+suffix, contains, leading zeros) and it searches invisible variations of the skin on your GPU. No build step, no server
 code, no upload; it can be hosted as-is (for example on GitHub Pages).
+
+Contains (hex) matches a hex string anywhere in the id: in the Mojang link id with leading zeros dropped, or in all 16 NameMC digits.
 
 ## Run locally
 

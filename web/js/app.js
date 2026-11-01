@@ -3,7 +3,7 @@ import { decodePng, mojangPng, W, H } from "./png.js";
 import { sha256, toHex } from "./hash.js";
 import { prepareSkin, autoChoose, rebuildJob, selfTest, makeTestVectors, makeRng, MAX_K } from "./job.js";
 import { initDevice, webgpuAvailable, prepareGpuJob } from "./gpu.js";
-import { parseHexList, targetList, targetKey, gpuTargets, gpuNmTargets, expectedTries } from "./targets.js";
+import { parseHexList, targetList, targetKey, gpuTargets, gpuNmTargets, expectedTries, MAXCONT } from "./targets.js";
 import { verifyHit, verifyNmHit, verifyBoth } from "./verify.js";
 import { prepareNameMc, makeNmTests, namemcIdHex } from "./namemc.js";
 import { NmGpuJob } from "./nmgpu.js";
@@ -153,16 +153,17 @@ function setMode(m) {
 document.querySelectorAll("input[name=mode]").forEach((el) => el.addEventListener("change", () => { if (S.running) { setMode(S.mode); return; } setMode(el.value); if (S.orig) rebuildPrep(); }));
 
 // ---------- targets ----------
-function readTargets() { return readGroup(S.mode === "namemc", ["prefixes", "suffixes", "zeros"]); }
+function readTargets() { return readGroup(S.mode === "namemc", NM_IDS); }
 function readGroup(nm, ids) {
-  const p = parseHexList($(ids[0]).value, "prefix", nm), s = parseHexList($(ids[1]).value, "suffix");
-  const errors = [...p.errors, ...s.errors];
-  const zeros = Math.max(0, Math.min(15, parseInt($(ids[2]).value || "0", 10) || 0));
-  const targets = targetList({ prefixes: p.list, suffixes: s.list, zeros });
+  const p = parseHexList($(ids[0]).value, "prefix", nm), s = parseHexList($(ids[1]).value, "suffix"), c = parseHexList($(ids[2]).value, "contains");
+  const errors = [...p.errors, ...s.errors, ...c.errors];
+  const zeros = Math.max(0, Math.min(15, parseInt($(ids[3]).value || "0", 10) || 0));
+  const targets = targetList({ prefixes: p.list, suffixes: s.list, contains: c.list, zeros });
   if (targets.length > 32) errors.push("At most 32 targets.");
+  if (c.list.length > MAXCONT) errors.push(`At most ${MAXCONT} contains patterns.`);
   return { targets, errors };
 }
-const NM_IDS = ["prefixes", "suffixes", "zeros"], MJ_IDS = ["mprefixes", "msuffixes", "mzeros"];
+const NM_IDS = ["prefixes", "suffixes", "contains", "zeros"], MJ_IDS = ["mprefixes", "msuffixes", "mcontains", "mzeros"];
 const firstHitTries = (targets, nm) => targets.length ? 1 / targets.reduce((a, t) => a + 1 / expectedTries(t, nm), 0) : 0;
 function updateExpect() {
   if (S.mode === "both") {
@@ -262,7 +263,7 @@ async function runMojang(bench, opts) {
     const r = readTargets();
     showErr("targeterr", r.errors.join(" "));
     if (r.errors.length) return;
-    if (!r.targets.length) { showErr("targeterr", "Enter a prefix, a suffix or minimum leading zeros."); return; }
+    if (!r.targets.length) { showErr("targeterr", "Enter a prefix, a suffix, a contains pattern or minimum leading zeros."); return; }
     targets = r.targets;
   }
   showErr("runerr", "");
@@ -291,7 +292,7 @@ async function runMojang(bench, opts) {
         if (!fresh.length) { dropped++; continue; }
         fresh.forEach((t) => remaining.delete(targetKey(t)));
         emit(r, fresh);
-        if (g) { const gt = gpuTargets(wantNow()); g.setTargets(gt.pats, gt.zeros); }
+        if (g) { const gt = gpuTargets(wantNow()); g.setTargets(gt.pats, gt.zeros, gt.cont); }
       } else emit(r, r.whys);
       hitCount++; finishCheck();
     }
@@ -315,12 +316,12 @@ async function runMojang(bench, opts) {
       const nSelf = selfTest(job, rng, 250);
       makeTestVectors(job, rng, 24, 104);   // 24 against full pako, 104 more from the byte-level builder
       setStatus("Compiling GPU kernel and checking it against the CPU...");
-      const prepared = await prepareGpuJob(device, job, { wg: Number(new URLSearchParams(location.search).get("wg")) || 256 });
+      const prepared = await prepareGpuJob(device, job, { wg: Number(new URLSearchParams(location.search).get("wg")) || 256, contains: targets.some((t) => t.kind === "contains") });
       g = prepared.g;
       const gate = prepared.gate;
       S.gate = { ...gate, selfTest: nSelf };
       if (!gate.ok) throw new Error(`GPU check failed: ${gate.bad} of ${gate.n} test vectors differ from the CPU (${gate.detail}). Search not started.`);
-      const gt = gpuTargets(wantNow()); g.setTargets(gt.pats, gt.zeros);
+      const gt = gpuTargets(wantNow()); g.setTargets(gt.pats, gt.zeros, gt.cont);
       if (bench && sets === 1) setTimeout(() => (S.stop = true), 10000);
       setStatus(`${bench ? "Benchmark" : "Searching"}. GPU matches CPU on ${gate.n}/${gate.n} test vectors. ${job.K} search pixels, ${job.nblk} SHA block${job.nblk > 1 ? "s" : ""}, ${gate.kernel} kernel.`, "ok");
       const base = totalTried, tRun = performance.now(); runT0 = tRun;
@@ -380,7 +381,7 @@ async function runNameMc(bench, opts) {
     const r = readTargets();
     showErr("targeterr", r.errors.join(" "));
     if (r.errors.length) return;
-    if (!r.targets.length) { showErr("targeterr", "Enter a prefix, a suffix or minimum leading zeros."); return; }
+    if (!r.targets.length) { showErr("targeterr", "Enter a prefix, a suffix, a contains pattern or minimum leading zeros."); return; }
     targets = r.targets;
   }
   showErr("runerr", "");
@@ -424,7 +425,7 @@ async function runNameMc(bench, opts) {
     await new Promise((r) => setTimeout(r, 10));
     const tests = makeNmTests(prep, rng, 96);
     setStatus("Compiling GPU kernel and checking it against the CPU...");
-    g = new NmGpuJob(device, prep, tests, { wg: Number(new URLSearchParams(location.search).get("wg")) || 256 });
+    g = new NmGpuJob(device, prep, tests, { wg: Number(new URLSearchParams(location.search).get("wg")) || 256, contains: targets.some((t) => t.kind === "contains") });
     await g.build();
     const gate = await g.gate();
     S.gate = { ...gate, selfTest: tests.length };

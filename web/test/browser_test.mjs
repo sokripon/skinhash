@@ -70,7 +70,7 @@ try {
   const runSearch = async (label, fields, nHits) => {
     await reset();
     await page.evaluate(() => { __skinhash.hits.length = 0; document.querySelector("#hits").innerHTML = ""; });
-    for (const [id, v] of Object.entries(fields)) { await page.$eval("#" + id, (el, val) => { el.value = val; el.dispatchEvent(new Event("input")); }, v); }
+    for (const [id, v] of Object.entries({ contains: "", ...fields })) { await page.$eval("#" + id, (el, val) => { el.value = val; el.dispatchEvent(new Event("input")); }, v); }
     await page.$eval("#stopn", (el, v) => { el.value = v; }, String(nHits));
     const t0 = Date.now();
     await page.click("#start");
@@ -101,6 +101,20 @@ try {
   const r3 = await runSearch("suffix cafe", { prefixes: "", suffixes: "cafe", zeros: "0" }, 2);
   check(r3.hits.length === 2, "suffix cafe: 2 hits");
   await grab(r3);
+  const rc = await runSearch("Mojang contains beef", { prefixes: "", suffixes: "", contains: "beef", zeros: "0" }, 3);
+  check(rc.hits.length === 3 && rc.hits.every((h) => h.id.includes("beef") && h.whys.includes("contains:beef")), "Mojang contains beef: 3 hits, trimmed ids contain beef");
+  await grab(rc);
+  for (const h of rc.hits) {
+    const v = spawnSync("py", [path.join(here, "contains_check.py"), path.join(outDir, h.id + ".png"), "beef"], { cwd: repo, encoding: "utf8" });
+    check(v.status === 0 && /^OK/.test(v.stdout), `contains_check (Python) ${h.id.slice(0, 20)}...: ${(v.stdout + v.stderr).trim().slice(0, 80)}`);
+  }
+  const rc2 = await runSearch("Mojang contains 00ab (leading 0 pattern) + 3 digits", { prefixes: "", suffixes: "", contains: "00ab, 7e1", zeros: "0" }, 2);
+  check(rc2.hits.length === 2 && rc2.hits.every((h) => h.id.includes("00ab") || h.id.includes("7e1")), "Mojang contains 00ab / 7e1 (two patterns, one starting with 0): 2 hits");
+  await grab(rc2);
+  for (const h of rc2.hits) {
+    const v = spawnSync("py", [path.join(here, "contains_check.py"), path.join(outDir, h.id + ".png"), h.id.includes("00ab") ? "00ab" : "7e1"], { cwd: repo, encoding: "utf8" });
+    check(v.status === 0 && /^OK/.test(v.stdout), `contains_check (Python) ${h.id.slice(0, 20)}...: ${(v.stdout + v.stderr).trim().slice(0, 80)}`);
+  }
 
   // 3. verify with the native tool
   for (const d of downloaded) {
@@ -136,6 +150,10 @@ try {
   check(nz.hits.length === 1 && nz.hits[0].id.startsWith("0000"), "NameMC prefix 0000: 1 hit");
   await grab(nz);
   for (const h of nz.hits) nmCheck(path.join(outDir, h.id + ".png"), "0000");
+  const nc = await runSearch("NameMC contains beef", { prefixes: "", suffixes: "", contains: "beef", zeros: "0" }, 3);
+  check(nc.hits.length === 3 && nc.hits.every((h) => h.id.length === 16 && h.id.includes("beef") && h.whys.includes("contains:beef")), "NameMC contains beef: 3 hits, 16-digit ids contain beef");
+  await grab(nc);
+  for (const h of nc.hits) nmCheck(path.join(outDir, h.id + ".png"), "contains:beef");
 
   // unused pixels only: the general kernel (about 50 SHA blocks per candidate)
   await page.click("#unusedonly");
@@ -226,6 +244,27 @@ try {
   await page.waitForFunction(() => !__skinhash.running, { timeout: 120000, polling: 100 });
   const again = await page.evaluate(() => ({ err: __skinhash.error, n: __skinhash.hits.filter((h) => h.mode === "both").length, id: (__skinhash.hits.find((h) => h.mode === "both") || {}).id }));
   check(!again.err && again.n === 1 && again.id.startsWith("dead"), `Both: second run from phase 1 works (Mojang ${again.id?.slice(0, 12)}...)`);
+  // Both mode with contains in both phases: NameMC bee anywhere in the 16 digits, then Mojang cafe anywhere in the link id
+  await reset();
+  await page.evaluate(() => { __skinhash.hits.length = 0; document.querySelector("#hits").innerHTML = ""; });
+  for (const [id, v] of Object.entries({ prefixes: "", contains: "bee", mprefixes: "", mcontains: "cafe" })) await page.$eval("#" + id, (el, val) => { el.value = val; el.dispatchEvent(new Event("input")); }, v);
+  await page.click("#start");
+  await page.waitForFunction(() => __skinhash.running, { timeout: 5000 });
+  await page.waitForFunction(() => !__skinhash.running, { timeout: 120000, polling: 100 });
+  const bc = await page.evaluate(() => ({ err: __skinhash.error, fin: __skinhash.hits.filter((h) => h.mode === "both").map((h) => ({ id: h.id, id16: h.id16 })), whys: __skinhash.hits.filter((h) => h.mode === "both").map((h) => h.whys) }));
+  check(!bc.err && bc.fin.length === 1 && bc.fin[0].id16.includes("bee") && bc.fin[0].id.includes("cafe"), `Both contains: NameMC ${bc.fin[0]?.id16} contains bee, Mojang ${bc.fin[0]?.id.slice(0, 24)}... contains cafe ${bc.err || ""}`);
+  for (const l of await page.$$("#hits a.dl")) await l.click();
+  await new Promise((r) => setTimeout(r, 1500));
+  if (bc.fin.length === 1) {
+    const f = path.join(outDir, bc.fin[0].id + ".png");
+    check(fs.existsSync(f), "Both contains: final PNG downloaded");
+    const cv = spawnSync("py", [path.join(here, "contains_check.py"), f, "cafe"], { cwd: repo, encoding: "utf8" });
+    check(cv.status === 0 && /^OK/.test(cv.stdout), `Both contains: contains_check (Python) ${cv.stdout.trim().slice(0, 60)}`);
+    nmCheck(f, "contains:bee", ["--mojang-knobs", "--id", bc.fin[0].id16]);
+    const bv = spawnSync("py", ["skinhash.py", "verify", skin, f], { cwd: repo, encoding: "utf8" });
+    check(bv.status === 0 && /^OK/.test(bv.stdout), `Both contains: skinhash.py verify <original> <final>: ${bv.stdout.trim().slice(0, 80)}`);
+  }
+  for (const [id, v] of Object.entries({ contains: "", mcontains: "", prefixes: "beef", mprefixes: "dead" })) await page.$eval("#" + id, (el, val) => { el.value = val; el.dispatchEvent(new Event("input")); }, v);
   // Stop works in phase 1: an impossible-to-hit NameMC target, then Stop
   await reset();
   await page.evaluate(() => { __skinhash.hits.length = 0; document.querySelector("#hits").innerHTML = ""; });

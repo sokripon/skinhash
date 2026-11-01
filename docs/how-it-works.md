@@ -154,6 +154,13 @@ Each extra leading zero takes 16× longer on average:
 
 In a ~64M-skin archive the shortest real skin link has 8 leading zeros, so 9 or more is a new record.
 
+A contains target (`--contains beef`) accepts the hex string anywhere in the id: in the link id with its leading zeros
+dropped for Mojang (so a match inside the dropped zeros does not count), in all 16 digits for NameMC. The finders
+compare the digest at every nibble offset, so a pattern of n digits needs about 16^n / (L - n + 1) tries
+(L is 16 for NameMC, about 60 for a Mojang link), and the check costs the GPU some speed: about 13% for one pattern on
+Mojang, 3% on NameMC, more for each further pattern (see [optimizations.md](optimizations.md)). Without a contains
+target the kernels are built without the check.
+
 Example result, made from `skins/steve.png` in the web page's Both mode and uploaded:
 
 - Mojang: `textures.minecraft.net/texture/7848d1fb944bf2b37a597632fc8e1abbd495a440e3f699b9124165`

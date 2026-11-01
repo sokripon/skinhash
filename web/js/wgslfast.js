@@ -207,7 +207,7 @@ function outerPart(D, F, P) {
   return s;
 }
 
-export function genFastShader(J, D, F, off, WG = 256) {
+export function genFastShader(J, D, F, off, WG = 256, contains = false) {
   const P = D.P, { WI, KB, sb, L, m, mo, lvl } = F;
   const tmplWord = (k) => D.tmpl[k];
   let s = `
@@ -355,7 +355,7 @@ ${outerPart(D, F, P)}`;
       TOUT[tid * 8u + 4u] = s4; TOUT[tid * 8u + 5u] = s5; TOUT[tid * 8u + 6u] = s6; TOUT[tid * 8u + 7u] = s7;
       return;
     }
-    ${hitCode()}
+    ${hitCode(contains)}
   }
   if (zbest > 0u && zbest > atomicLoad(&HITS[1])) { atomicMax(&HITS[1], zbest); }
 }

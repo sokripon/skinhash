@@ -166,6 +166,50 @@ static int parse_pat(const char *hex, int suffix) {
     return 0;
 }
 
+/* "Contains" patterns: a hex string anywhere in the id. d[] holds the digits (0-15). */
+typedef struct { int n; uint8_t d[16]; char text[17]; } cpat_t;
+static cpat_t cpats[MAX_PAT];
+static int ncpats = 0;
+
+static int parse_contains(const char *hex) {
+    size_t n = strlen(hex);
+    if (n == 0 || n > 16 || ncpats >= MAX_PAT) return -1;
+    cpat_t *p = &cpats[ncpats];
+    for (size_t i = 0; i < n; i++) {
+        char c = hex[i];
+        int v = (c >= '0' && c <= '9') ? c - '0' : (c >= 'a' && c <= 'f') ? c - 'a' + 10 :
+                (c >= 'A' && c <= 'F') ? c - 'A' + 10 : -1;
+        if (v < 0) return -1;
+        p->d[i] = (uint8_t)v;
+        p->text[i] = (char)(hex[i] | 0x20);
+    }
+    p->n = (int)n;
+    p->text[n] = 0;
+    ncpats++;
+    return 0;
+}
+
+/* Text of the first contains pattern found in nibbles first.. of the digest bytes dg (nbytes bytes), or NULL.
+ * A Mojang id is searched after its leading zero nibbles, because the link drops them; a NameMC id is the
+ * first 8 bytes (16 digits, first = 0). */
+static const char *contains_find(const uint8_t *dg, int nbytes, int first) {
+    uint8_t nib[64];
+    int last = 2 * nbytes;
+    for (int i = 0; i < nbytes; i++) { nib[2*i] = dg[i] >> 4; nib[2*i+1] = dg[i] & 15; }
+    for (int k = 0; k < ncpats; k++) {
+        const cpat_t *p = &cpats[k];
+        for (int o = first; o + p->n <= last; o++)
+            if (!memcmp(nib + o, p->d, (size_t)p->n)) return p->text;
+    }
+    return NULL;
+}
+
+/* Leading zero nibbles of a 32-byte digest, at most 63: the trimmed id of an all-zero hash is "0". */
+static inline int digest_zero_nibbles(const uint8_t dg[32]) {
+    int z = 0;
+    while (z < 63 && !(z & 1 ? dg[z >> 1] & 15 : dg[z >> 1] >> 4)) z++;
+    return z;
+}
 
 /* Top 64 bits of the id with leading zero nibbles dropped, as in the texture URL.
  * hi/mid are the first 16 digest bytes as two big-endian 64-bit words. */

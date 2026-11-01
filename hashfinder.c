@@ -17,6 +17,7 @@
  * options:
  *   -p HEX    match if the trimmed id (leading zeros dropped) starts with HEX (not 0...)
  *   -s HEX    match if the sha256 hex ends with HEX (repeatable, <=16 chars)
+ *   -c HEX    match if HEX occurs anywhere in the trimmed id (repeatable, <=16 chars, may start with 0)
  *   -z N      also save any hash with >= N leading zero nibbles
  *   -t N      threads (default: all logical CPUs)
  *   -S SEED   64-bit start counter (default: random)
@@ -155,6 +156,10 @@ static void *worker(void *arg) {
                 break;
             }
         }
+        if (!why && ncpats) {
+            const char *c = contains_find(d, 32, digest_zero_nibbles(d));
+            if (c) { snprintf(whybuf, sizeof whybuf, "contains:%s", c); why = whybuf; }
+        }
         int zn = hi ? __builtin_clzll(hi) / 4 : 16;
         if (zn > best) {
             best = atomic_load(&g_best_zeros);
@@ -195,7 +200,7 @@ static uint64_t rand_seed(void) {
 
 int main(int argc, char **argv) {
     if (argc < 4) {
-        fprintf(stderr, "usage: hashfinder raw.bin offsets outdir [-p HEX]... [-s HEX]... [-z N] [-t N] [-S SEED] [-n N] [-b]\n");
+        fprintf(stderr, "usage: hashfinder raw.bin offsets outdir [-p HEX]... [-s HEX]... [-c HEX]... [-z N] [-t N] [-S SEED] [-n N] [-b]\n");
         return 1;
     }
     FILE *fp = fopen(argv[1], "rb");
@@ -219,6 +224,7 @@ int main(int argc, char **argv) {
         const char *v = i + 1 < argc ? argv[i + 1] : NULL;
         if (!strcmp(a, "-p") && v) { if (parse_pat(v, 0)) { fprintf(stderr, "bad -p %s\n", v); return 1; } i++; }
         else if (!strcmp(a, "-s") && v) { if (parse_pat(v, 1)) { fprintf(stderr, "bad -s %s\n", v); return 1; } i++; }
+        else if (!strcmp(a, "-c") && v) { if (parse_contains(v)) { fprintf(stderr, "bad -c %s\n", v); return 1; } i++; }
         else if (!strcmp(a, "-z") && v) { g_zeros = atoi(v); i++; }
         else if (!strcmp(a, "-t") && v) { g_threads = atoi(v); i++; }
         else if (!strcmp(a, "-S") && v) { g_seed = strtoull(v, NULL, 0); i++; }
@@ -237,9 +243,9 @@ int main(int argc, char **argv) {
         fprintf(stderr, "SHA-256 self-test failed\n"); return 2;
     }
     if (g_threads < 1) g_threads = 1;
-    fprintf(stderr, "threads=%d seed=%llu tail=%d bytes (of %d) sha=%s patterns=%d zeros>=%d\n",
+    fprintf(stderr, "threads=%d seed=%llu tail=%d bytes (of %d) sha=%s patterns=%d contains=%d zeros>=%d\n",
             g_threads, (unsigned long long)g_seed, RAW_LEN - g_split, RAW_LEN,
-            sha256_block == sha256_block_generic ? "generic" : "sha-ni", npats, g_zeros);
+            sha256_block == sha256_block_generic ? "generic" : "sha-ni", npats, ncpats, g_zeros);
     fflush(stderr);
 
     pthread_t *th = calloc(g_threads, sizeof *th);

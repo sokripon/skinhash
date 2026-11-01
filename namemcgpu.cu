@@ -40,6 +40,7 @@
 #define NK 3
 #define MAXNB 64
 #define MAXPAT 64
+#define MAXCONT 16
 #define MAXHITS 4096
 #define INNER 1024
 #ifndef BLOCK
@@ -61,6 +62,8 @@ __constant__ u32 c_s9[8];               /* fast kernel: state of the first knob 
 __constant__ u32 c_nb, c_np;
 __constant__ u32 c_pblk[NK], c_pwd[NK];
 __constant__ u64 c_pval[MAXPAT], c_pmask[MAXPAT];
+__constant__ u32 c_ncont;
+__constant__ u32 c_cp[MAXCONT * 5];     /* per contains pattern: p1, m1, p2, m2, lim (digits 1-8 / 9-16 left-aligned, 16 - n) */
 __constant__ u64 c_zthr;                /* id < zthr is a hit (0 = off) */
 __constant__ u32 c_K256[64] = {
     0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,
@@ -110,10 +113,31 @@ __device__ __forceinline__ void sha_const(u32 st[8], int off) {
     st[0] += a; st[1] += b; st[2] += c; st[3] += d; st[4] += e; st[5] += f; st[6] += g; st[7] += h;
 }
 
+/* A contains pattern anywhere in the 16 digits of the id (hi:lo). Per offset one funnel shift, one LOP3 and a
+ * compare against the first 8 pattern digits; only a match there looks at the second window and the range. */
+__device__ __forceinline__ bool contains_id(u32 hi, u32 lo) {
+    for (u32 i = 0; i < c_ncont; i++) {
+        const u32 p1 = c_cp[i * 5], m1 = c_cp[i * 5 + 1], p2 = c_cp[i * 5 + 2], m2 = c_cp[i * 5 + 3], lim = c_cp[i * 5 + 4];
+#pragma unroll
+        for (int o = 0; o < 16; o++) {
+            const int sh = 4 * (o & 7);
+            const u32 w0 = o < 8 ? hi : lo, w1 = o < 8 ? lo : 0u;
+            const u32 a = sh ? __funnelshift_l(w1, w0, sh) : w0;
+            if (((a ^ p1) & m1) == 0u) {
+                const u32 b = o < 8 ? (sh ? lo << sh : lo) : 0u;
+                if (((b ^ p2) & m2) == 0u && (u32)o <= lim) return true;
+            }
+        }
+    }
+    return false;
+}
+
+template <bool CONT>
 __device__ __forceinline__ bool is_hit(u64 id) {
     if (id < c_zthr) return true;
     for (u32 i = 0; i < c_np; i++)
         if ((id & c_pmask[i]) == c_pval[i]) return true;
+    if (CONT) return contains_id((u32)(id >> 32), (u32)id);
     return false;
 }
 
@@ -139,7 +163,7 @@ constexpr __host__ __device__ DepTab make_dep() {
  * do not depend on word 11 run once per thread, and every dependent schedule word keeps the sum of its
  * independent terms in a register (pw). The 1024-candidate loop does only rounds 11-63 of the first block
  * and the dependent part of the schedule, then the constant second block. */
-template <int MODE>
+template <int MODE, bool CONT>
 __global__ void __launch_bounds__(BLOCK, MINB) fast_kernel(u64 base, const u64 *tc, u32 n, u64 *out) {
     constexpr DepTab dep = make_dep();
     u32 gid = blockIdx.x * BLOCK + threadIdx.x;
@@ -203,14 +227,14 @@ __global__ void __launch_bounds__(BLOCK, MINB) fast_kernel(u64 base, const u64 *
         if (MODE) { if (t == tsel) out[gid] = id; }
         else {
             best = id < best ? id : best;
-            if (is_hit(id)) record(cb + t);
+            if (is_hit<CONT>(id)) record(cb + t);
         }
     }
     if (!MODE) atomicMin(&d_best, best);
 }
 
 /* general kernel: any block layout, one candidate per thread */
-template <int MODE>
+template <int MODE, bool CONT>
 __global__ void __launch_bounds__(BLOCK, MINB) general_kernel(u64 base, const u64 *tc, u32 n, u64 *out) {
     u32 gid = blockIdx.x * BLOCK + threadIdx.x;
     if (gid >= n) return;
@@ -239,7 +263,7 @@ __global__ void __launch_bounds__(BLOCK, MINB) general_kernel(u64 base, const u6
     if (MODE) out[gid] = id;
     else {
         atomicMin(&d_best, id);
-        if (is_hit(id)) record(c);
+        if (is_hit<CONT>(id)) record(c);
     }
 }
 
@@ -301,6 +325,24 @@ static double now_s() {
 }
 
 struct Pat { u64 val, mask; bool suffix; char text[24]; };
+/* "contains" pattern: p1/m1 = digits 1-8, p2/m2 = digits 9-16, left-aligned; lim = 16 - n */
+struct CPat { u32 p1, m1, p2, m2, lim, n; char text[20]; };
+static bool parse_contains(const char *hex, CPat &c) {
+    size_t n = strlen(hex);
+    if (n == 0 || n > 16) return false;
+    memset(&c, 0, sizeof c);
+    for (size_t i = 0; i < n; i++) {
+        char ch = hex[i];
+        int v = (ch >= '0' && ch <= '9') ? ch - '0' : (ch >= 'a' && ch <= 'f') ? ch - 'a' + 10 : (ch >= 'A' && ch <= 'F') ? ch - 'A' + 10 : -1;
+        if (v < 0) return false;
+        u32 *w = i < 8 ? &c.p1 : &c.p2, *m = i < 8 ? &c.m1 : &c.m2;
+        int sh = 28 - 4 * (int)(i & 7);
+        *w |= (u32)v << sh; *m |= 0xFu << sh;
+        c.text[i] = (char)(ch | 0x20);
+    }
+    c.n = (u32)n; c.lim = 16 - (u32)n;
+    return true;
+}
 static bool parse_pat(const char *hex, bool suffix, Pat &p) {
     size_t n = strlen(hex);
     if (n == 0 || n > 16) return false;
@@ -323,6 +365,7 @@ static u8 g_msg[MSG_LEN];
 static int g_kx[NK], g_ky[NK];
 static size_t g_off[NK];
 static std::vector<Pat> g_pats;
+static std::vector<CPat> g_cont;
 static u32 g_zeros = 0;
 
 static void put32(u8 *p, u32 v) { p[0] = v >> 24; p[1] = v >> 16; p[2] = v >> 8; p[3] = v; }
@@ -367,13 +410,19 @@ static int clz64(u64 x) { int n = 0; while (n < 64 && !(x >> (63 - n) & 1)) n++;
 static bool match_why(u64 id, std::string &why) {
     for (auto &p : g_pats)
         if ((id & p.mask) == p.val) { why = std::string(p.suffix ? "suffix:" : "prefix:") + p.text; return true; }
+    for (const CPat &c : g_cont)
+        for (int o = 0; o + (int)c.n <= 16; o++) {
+            int k = 0;
+            while (k < (int)c.n && (int)((id >> (60 - 4 * (o + k))) & 15) == (int)(((k < 8 ? c.p1 : c.p2) >> (28 - 4 * (k & 7))) & 15u)) k++;
+            if (k == (int)c.n) { why = std::string("contains:") + c.text; return true; }
+        }
     int zn = id ? clz64(id) / 4 : 16;
     if (g_zeros && (u32)zn >= g_zeros) { why = "zeros:" + std::to_string(zn); return true; }
     return false;
 }
 
 int main(int argc, char **argv) {
-    if (argc < 5) { fprintf(stderr, "usage: namemcgpu rgba.bin OUTDIR -k x,y,x,y,x,y [--render-exe EXE] [-p HEX]... [-s HEX]... [-z N] [-S SEED] [-n N] [-b]\n"); return 1; }
+    if (argc < 5) { fprintf(stderr, "usage: namemcgpu rgba.bin OUTDIR -k x,y,x,y,x,y [--render-exe EXE] [-p HEX]... [-s HEX]... [-c HEX]... [-z N] [-S SEED] [-n N] [-b]\n"); return 1; }
     FILE *fp = fopen(argv[1], "rb");
     if (!fp || fread(g_rgba, 1, sizeof g_rgba, fp) != sizeof g_rgba) { fprintf(stderr, "bad rgba file\n"); return 1; }
     fclose(fp);
@@ -391,6 +440,11 @@ int main(int argc, char **argv) {
         else if ((!strcmp(a, "-p") || !strcmp(a, "-s")) && v) {
             if (!parse_pat(v, a[1] == 's', p) || g_pats.size() >= MAXPAT) { fprintf(stderr, "bad %s %s\n", a, v); return 1; }
             g_pats.push_back(p); i++;
+        }
+        else if (!strcmp(a, "-c") && v) {
+            CPat c;
+            if (!parse_contains(v, c) || g_cont.size() >= MAXCONT) { fprintf(stderr, "bad -c %s\n", v); return 1; }
+            g_cont.push_back(c); i++;
         }
         else if (!strcmp(a, "-z") && v) { g_zeros = (u32)atoi(v); i++; }
         else if (!strcmp(a, "-S") && v) { seed = strtoull(v, nullptr, 0); i++; }
@@ -485,11 +539,25 @@ int main(int argc, char **argv) {
     CK(cudaMemcpyToSymbol(c_pval, pv, sizeof pv));
     CK(cudaMemcpyToSymbol(c_pmask, pm, sizeof pm));
     CK(cudaMemcpyToSymbol(c_zthr, &zthr, 8));
+    {
+        u32 nc = (u32)g_cont.size(), cp[MAXCONT * 5] = {0};
+        for (size_t i = 0; i < g_cont.size(); i++) { cp[5*i] = g_cont[i].p1; cp[5*i+1] = g_cont[i].m1; cp[5*i+2] = g_cont[i].p2; cp[5*i+3] = g_cont[i].m2; cp[5*i+4] = g_cont[i].lim; }
+        CK(cudaMemcpyToSymbol(c_ncont, &nc, 4));
+        CK(cudaMemcpyToSymbol(c_cp, cp, sizeof cp));
+    }
+    const bool cont = !g_cont.empty();
 
     auto launch = [&](bool test, u64 base, const u64 *tc, u32 n, u64 *out) {
         u32 grid = (n + BLOCK - 1) / BLOCK;
-        if (fast) { if (test) fast_kernel<1><<<grid, BLOCK>>>(base, tc, n, out); else fast_kernel<0><<<grid, BLOCK>>>(base, tc, n, out); }
-        else { if (test) general_kernel<1><<<grid, BLOCK>>>(base, tc, n, out); else general_kernel<0><<<grid, BLOCK>>>(base, tc, n, out); }
+        if (fast) {
+            if (test) fast_kernel<1, false><<<grid, BLOCK>>>(base, tc, n, out);
+            else if (cont) fast_kernel<0, true><<<grid, BLOCK>>>(base, tc, n, out);
+            else fast_kernel<0, false><<<grid, BLOCK>>>(base, tc, n, out);
+        } else {
+            if (test) general_kernel<1, false><<<grid, BLOCK>>>(base, tc, n, out);
+            else if (cont) general_kernel<0, true><<<grid, BLOCK>>>(base, tc, n, out);
+            else general_kernel<0, false><<<grid, BLOCK>>>(base, tc, n, out);
+        }
         CK(cudaGetLastError());
     };
 
@@ -522,9 +590,9 @@ int main(int argc, char **argv) {
     u64 base = seed & ~(u64)(INNER - 1);
     u32 per = fast ? INNER : 1;
     u32 threads = fast ? (1u << 14) : (1u << 20);
-    fprintf(stderr, "device=%s (sm_%d%d, %d SMs) kernel=%s knobs=(%d,%d)(%d,%d)(%d,%d) blocks=%zu patterns=%zu zeros>=%u seed=%llu\n", prop.name,
+    fprintf(stderr, "device=%s (sm_%d%d, %d SMs) kernel=%s knobs=(%d,%d)(%d,%d)(%d,%d) blocks=%zu patterns=%zu contains=%zu zeros>=%u seed=%llu\n", prop.name,
             prop.major, prop.minor, prop.multiProcessorCount, fast ? "fast" : "general", g_kx[0], g_ky[0], g_kx[1], g_ky[1], g_kx[2], g_ky[2],
-            nb, g_pats.size(), g_zeros, (unsigned long long)seed);
+            nb, g_pats.size(), g_cont.size(), g_zeros, (unsigned long long)seed);
     fflush(stderr);
 
     u32 zero = 0; u64 allones = ~0ull;

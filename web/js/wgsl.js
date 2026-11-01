@@ -5,6 +5,9 @@ import { RIN, NPERM } from "./job.js";
 
 export const MAXHITS = 1024;
 export const MAXPAT = 32;
+export const MAXCONT = 16;
+export const CB = 2 + 5 * MAXPAT;                 // Mojang kernels: contains table in PT after the prefix/suffix patterns
+export const PT_WORDS = CB + 1 + 5 * MAXCONT;     // [count, then p1 m1 p2 m2 lim per pattern]
 export const HITS_WORDS = 2 + 2 * MAXHITS;
 export const NTEST_STRIDE = 20;
 
@@ -95,8 +98,41 @@ export function buildConsts(D, nblk) {
 const hex = (v) => `0x${(v >>> 0).toString(16)}u`;
 const ror = (x, n) => `((${x} >> ${n}u) | (${x} << ${32 - n}u))`;
 
+/**
+ * "Contains" check: a pattern of up to 16 hex digits anywhere in the id. First pass, unrolled over every digit
+ * offset o: a shifted 32-bit window of the id is masked and compared with the first (up to) 8 pattern digits, and
+ * min() folds all results into one word that is 0 iff some window matched. Only then does the second pass look at
+ * the other 8 digits and the range (o <= lim, o >= zl: matches inside the dropped leading zeros of a Mojang id do
+ * not count). `words` are the WGSL names of the id words, `cb` the table offset in PT (count, then p1 m1 p2 m2 lim
+ * per pattern). Sets `hit = true` and leaves the loop on a match; expects `var hit` in scope.
+ */
+export function containsCode({ words, cb, zl }) {
+  const W = words.length, width = W * 8;
+  let c = `if (PT[${cb}u] != 0u) {
+    let nc = PT[${cb}u];
+    for (var ci = 0u; ci < nc; ci++) {
+      let cb_ = ${cb + 1}u + 5u * ci;
+      let p1 = PT[cb_]; let m1 = PT[cb_ + 1u]; let p2 = PT[cb_ + 2u]; let m2 = PT[cb_ + 3u]; let lim = PT[cb_ + 4u];
+      var mn = 0xFFFFFFFFu;
+`;
+  const windows = (o) => {
+    const w = o >> 3, sh = 4 * (o & 7);
+    const n1 = w + 1 < W ? words[w + 1] : null, n2 = w + 2 < W ? words[w + 2] : null;
+    const win = (x, y) => (sh === 0 ? (x ?? "0u") : y ? `((${x} << ${sh}u) | (${y} >> ${32 - sh}u))` : x ? `(${x} << ${sh}u)` : "0u");
+    return [win(words[w], n1), sh === 0 ? (n1 ?? "0u") : win(n1, n2)];
+  };
+  for (let o = 0; o < width; o++) c += `      mn = min(mn, ((${windows(o)[0]} ^ p1) & m1));\n`;
+  c += "      if (mn == 0u) {\n";
+  for (let o = 0; o < width; o++) {
+    const [a, b] = windows(o);
+    c += `        if ((((${a}) ^ p1) & m1) == 0u && ((((${b}) ^ p2) & m2) == 0u) && ${o}u <= lim && ${o}u >= ${zl}) { hit = true; break; }\n`;
+  }
+  c += "      }\n    }\n  }\n";
+  return c;
+}
+
 /** Target matching and hit recording for one candidate; expects s0..s7 (digest words), gid, tt, zbest in scope. */
-export function hitCode() {
+export function hitCode(contains = false) {
   return `let zn = select(select(16u, 8u + (countLeadingZeros(s1) >> 2u), s1 != 0u), countLeadingZeros(s0) >> 2u, s0 != 0u);
     zbest = max(zbest, zn);
     var hit = PT[1] != 0u && zn >= PT[1];
@@ -115,6 +151,7 @@ export function hitCode() {
         if ((vh & PT[pb + 2u]) == PT[pb] && (vl & PT[pb + 3u]) == PT[pb + 1u]) { hit = true; break; }
       }
     }
+    ${contains ? "if (!hit) {\n" + containsCode({ words: ["s0", "s1", "s2", "s3", "s4", "s5", "s6", "s7"], cb: CB, zl: "zn" }) + "}" : ""}
     if (hit) {
       let pos = atomicAdd(&HITS[0], 1u);
       if (pos < ${MAXHITS}u) { atomicStore(&HITS[2u + 2u * pos], gid); atomicStore(&HITS[3u + 2u * pos], tt); }
@@ -162,7 +199,7 @@ ${Hh} = t1 + (${ror(A, 2)} ^ ${ror(A, 13)} ^ ${ror(A, 22)}) + ((${A} & ${B}) | (
   return c;
 }
 
-function runOuter(name, test, D, off, WGs) {
+function runOuter(name, test, D, off, WGs, contains = false) {
   const P = D.P, m = P.m, mo = m - RIN, nblk = P.nblk, KW = P.KW;
   const maskm = ((1 << m) - 1) >>> 0;
   let s = `fn ${name}(doff: u32, gid: u32, tlo: u32, thi: u32, tid: u32) {
@@ -236,7 +273,7 @@ function runOuter(name, test, D, off, WGs) {
 `;
     return s;
   }
-  s += `    ${hitCode()}
+  s += `    ${hitCode(contains)}
   }
   if (zbest > 0u && zbest > atomicLoad(&HITS[1])) { atomicMax(&HITS[1], zbest); }
 }
@@ -244,7 +281,7 @@ function runOuter(name, test, D, off, WGs) {
   return s;
 }
 
-export function genShader(D, off, WG = 256, nTests = 24) {
+export function genShader(D, off, WG = 256, nTests = 24, contains = false) {
   const TW = 64;
   return `
 @group(0) @binding(0) var<storage, read> KT: array<u32>;
@@ -270,7 +307,7 @@ fn load_shared(li: u32, nthreads: u32) {
   for (var i = li; i < 64u; i += nthreads) { s_tab[i] = KT[${off.TAB}u + i]; s_val[i] = KT[${off.VAL}u + i]; }
   workgroupBarrier();
 }
-${runOuter("run_search", false, D, off, WG).replaceAll("GT[", "s_gt[")}
+${runOuter("run_search", false, D, off, WG, contains).replaceAll("GT[", "s_gt[")}
 ${runOuter("run_test", true, D, off, WG).replaceAll("GT[", "s_gt[")}
 
 @compute @workgroup_size(${WG})

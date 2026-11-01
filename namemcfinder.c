@@ -9,7 +9,7 @@
  * Counter c (64 bit) -> pixels, knob pixels in message order kp[0] < kp[1] < kp[2]:
  *   kp[2] RGB = c & 0xFFFFFF,  kp[1] RGB = (c >> 24) & 0xFFFFFF,  kp[0] RGB = c >> 48
  *
- * usage: namemcfinder rgba.bin OUTDIR -k x,y,x,y,x,y [-p HEX]... [-s HEX]... [-z N] [-t N] [-S SEED]
+ * usage: namemcfinder rgba.bin OUTDIR -k x,y,x,y,x,y [-p HEX]... [-s HEX]... [-c HEX]... [-z N] [-t N] [-S SEED]
  *                     [-n N] [-b]
  *        namemcfinder rgba.bin OUTDIR -k ... --render COUNTER --expect ID16   (write one PNG, used by namemcgpu)
  * rgba.bin: 64*64*4 bytes, the skin with the three knob pixels at alpha 1.
@@ -179,6 +179,12 @@ static const char *match_why(uint64_t id, char *buf, size_t cap) {
             snprintf(buf, cap, "%s:%s", pats[i].suffix ? "suffix" : "prefix", pats[i].text);
             return buf;
         }
+    if (ncpats) {
+        uint8_t b[8];
+        for (int i = 0; i < 8; i++) b[i] = (uint8_t)(id >> (56 - 8 * i));
+        const char *c = contains_find(b, 8, 0);
+        if (c) { snprintf(buf, cap, "contains:%s", c); return buf; }
+    }
     int zn = id ? __builtin_clzll(id) / 4 : 16;
     if (g_zeros && zn >= g_zeros) { snprintf(buf, cap, "zeros:%d", zn); return buf; }
     return NULL;
@@ -254,7 +260,7 @@ static void self_test(void) {
 
 int main(int argc, char **argv) {
     if (argc < 5) {
-        fprintf(stderr, "usage: namemcfinder rgba.bin OUTDIR -k x,y,x,y,x,y [-p HEX]... [-s HEX]... [-z N] [-t N] [-S SEED] [-n N] [-b]\n");
+        fprintf(stderr, "usage: namemcfinder rgba.bin OUTDIR -k x,y,x,y,x,y [-p HEX]... [-s HEX]... [-c HEX]... [-z N] [-t N] [-S SEED] [-n N] [-b]\n");
         return 1;
     }
     FILE *fp = fopen(argv[1], "rb");
@@ -276,6 +282,7 @@ int main(int argc, char **argv) {
         }
         else if (!strcmp(a, "-p") && v) { if (parse_pat(v, 0)) { fprintf(stderr, "bad -p %s\n", v); return 1; } i++; }
         else if (!strcmp(a, "-s") && v) { if (parse_pat(v, 1)) { fprintf(stderr, "bad -s %s\n", v); return 1; } i++; }
+        else if (!strcmp(a, "-c") && v) { if (parse_contains(v)) { fprintf(stderr, "bad -c %s\n", v); return 1; } i++; }
         else if (!strcmp(a, "-z") && v) { g_zeros = atoi(v); i++; }
         else if (!strcmp(a, "-t") && v) { g_threads = atoi(v); i++; }
         else if (!strcmp(a, "-S") && v) { g_seed = strtoull(v, NULL, 0); i++; }
@@ -317,8 +324,8 @@ int main(int argc, char **argv) {
         return r;
     }
 
-    fprintf(stderr, "threads=%d seed=%llu knobs=(%d,%d)(%d,%d)(%d,%d) blocks=%zu patterns=%d zeros>=%d sha=%s\n", g_threads,
-            (unsigned long long)g_seed, g_kx[0], g_ky[0], g_kx[1], g_ky[1], g_kx[2], g_ky[2], g_nblk, npats, g_zeros,
+    fprintf(stderr, "threads=%d seed=%llu knobs=(%d,%d)(%d,%d)(%d,%d) blocks=%zu patterns=%d contains=%d zeros>=%d sha=%s\n", g_threads,
+            (unsigned long long)g_seed, g_kx[0], g_ky[0], g_kx[1], g_ky[1], g_kx[2], g_ky[2], g_nblk, npats, ncpats, g_zeros,
             sha256_block == sha256_block_generic ? "generic" : "sha-ni");
     fflush(stderr);
     atomic_store(&g_next, (g_seed & ~(CHUNK - 1)));

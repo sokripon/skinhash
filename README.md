@@ -73,6 +73,7 @@ Options shared by the search commands (`mojang`, `namemc`, `both`):
 |---|---|
 | `-p, --prefix HEX` | id starts with HEX. Repeatable. |
 | `-s, --suffix HEX` | id ends with HEX. Repeatable. |
+| `-c, --contains HEX` | HEX occurs anywhere in the id (1-16 hex digits, may start with 0). Repeatable. |
 | `-z, --zeros N` | at least N leading zero digits. Repeatable. |
 | `-n, --count N` | stop after N verified hits (default 1) |
 | `--every-target` | run until every target has a hit; the first hit per target is kept, `-n` is ignored |
@@ -85,6 +86,11 @@ Options shared by the search commands (`mojang`, `namemc`, `both`):
 | `--threads N`, `--seed N` | CPU threads; start seed |
 
 Prefixes are hex, at most 16 digits. Targets of one command are alternatives: a hit matches any of them.
+`--contains` looks at the id as shown in the link: for Mojang the trimmed id (leading zeros dropped), so a match
+that lies partly or fully in the dropped zeros does not count (`-c 0a` does not match a link `a1b2...` of a hash
+that starts `00a1b2...`); for NameMC the fixed 16 digits. The hit is reported as `contains:HEX`. Each extra
+`--contains` pattern costs GPU speed, about 13% for the first on Mojang and 3% on NameMC (see
+`docs/optimizations.md`).
 Every hit is re-verified by `skinhash.py` (hash equals file name, Python zlib re-encodes the file identically,
 no visible pixel changed) and printed as `HIT <why> sha=<full hex> id=<id> counter=<n> file=<path>`.
 Ctrl+C stops everything and never starts a fallback. Unknown options are an error; nothing is passed on to the
@@ -96,6 +102,7 @@ finders unchecked.
 py skinhash.py mojang skins/me.png -p c0ffee            # id (trimmed) starts with c0ffee
 py skinhash.py mojang skins/me.png -z 8                 # >= 8 leading zeros (shortest links)
 py skinhash.py mojang skins/me.png -s dead -n 3         # ends with dead, stop after 3 hits
+py skinhash.py mojang skins/me.png -c beef -n 3         # beef anywhere in the link id
 py skinhash.py mojang skins/me.png -z 10 --no-generic   # never use the slow search
 ```
 
@@ -143,13 +150,14 @@ Output goes to `found/<skin>_collide/`.
 ```
 py skinhash.py both skins/me.png --namemc-prefix beef --mojang-prefix cafe
 py skinhash.py both skins/me.png --namemc-zeros 6 --mojang-zeros 9 --every-target
+py skinhash.py both skins/me.png --namemc-contains bee --mojang-contains cafe
 py skinhash.py both skins/me.png --mojang-prefix c0ffee        # only one group: only that phase
 ```
 
 | Option | Meaning |
 |---|---|
-| `--namemc-prefix/-suffix/-zeros` | NameMC targets (phase 1), same rules as `namemc` |
-| `--mojang-prefix/-suffix/-zeros` | Mojang targets (phase 2), same rules as `mojang` |
+| `--namemc-prefix/-suffix/-contains/-zeros` | NameMC targets (phase 1), same rules as `namemc` |
+| `--mojang-prefix/-suffix/-contains/-zeros` | Mojang targets (phase 2), same rules as `mojang` |
 | `-n`, `--every-target`, `--engine`, `--no-generic`, `--unused-only`, `--tail-pixels`, `--no-watermark`, `-o`, `--threads`, `--seed` | as above; `-n` applies to phase 2 |
 
 Phase 1 runs a NameMC search up to its first verified hit (with `--every-target`, across the NameMC targets, and

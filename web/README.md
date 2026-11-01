@@ -21,7 +21,8 @@ answers `text/plain` for `.js` and the browser refuses to load the ES modules. N
 | `js/png.js` | PNG decode without canvas (canvas would premultiply alpha and destroy hidden RGB); Mojang re-encode (`mojang_png`) |
 | `js/job.js` | `fastfinder.c`: `setup_fast`, `parse_deflate`, `--auto`, self-test, test vectors, index to permutation |
 | `js/hash.js` | SHA-256 (midstate), CRC-32 |
-| `js/wgsl.js`, `js/gpu.js` | `gpufinder.cu`: same enumeration (outer x 24 orderings), word-wise CRC, one SHA block, u32 only |
+| `js/wgsl.js`, `js/gpu.js` | `gpufinder.cu`, generic kernel: same enumeration (outer x 24 orderings), word-wise CRC, any layout, u32 only |
+| `js/wgslfast.js` | `gpufinder.cu`, fast kernel (step 7 in `docs/optimizations.md`): generated per job, see below |
 | `js/verify.js` | `skinhash.py verify`: every hit rebuilt, hashed, pixel-compared, re-encoded |
 | `vendor/pako.esm.mjs` | zlib; pako 2.1.0, unmodified, MIT and Zlib licences in `vendor/LICENSE-pako` |
 
@@ -57,12 +58,20 @@ about 34 million tries instead of 16^12). With one group empty only the other ph
 `skinhash.py verify <original> <final>` accepts the result too (it treats alpha 0 to 1 on overlay or unused pixels
 as a NameMC knob).
 
+Mojang kernel: for one-block jobs whose permuted values all have the same Huffman code length (the job builder
+prefers those, like `fastfinder --auto`) `js/wgslfast.js` generates a shader per job: message words are an OR of
+per-(position, value) table entries, the CRC an XOR of precomputed deltas, Adler-b a sum of precomputed terms, and
+SHA rounds 0..WI-1 and the thread-only schedule terms run once per thread. Other jobs use the generic kernel. The
+status line says which one runs. In Chrome on an RTX 5060 Ti this is about 3.7 G/s (the generic kernel: 2.9 G/s;
+native CUDA: 4.8 G/s). If the fast kernel does not reproduce every test vector the page falls back to the generic
+kernel and gates that; it refuses to search only if both fail.
+
 Differences: the zlib stream comes from pako instead of C zlib (proven byte-identical, see below); fast mode
 only (no slow generic CPU mode); fast mode needs the last 5 pixels of the image invisible (the native tool asks
 for 6 and uses K=5 or 6); the whole value-set rollover happens in the page.
 
 Safety checks: before searching, and after every value-set rollover, a CPU self-test (250 random permutations
-equal to full pako output) and a GPU gate (24 CPU test vectors reproduced exactly) must pass, otherwise the
+equal to full pako output) and a GPU gate (128 test vectors, 24 against full pako and 104 from the byte-level builder, reproduced exactly) must pass, otherwise the
 search refuses to run. Every hit is rebuilt on the CPU, hashed with WebCrypto and JS, compared with the
 original skin (only search pixels and watermark differ, alpha unchanged, nothing visible) and re-encoded with
 pako before it is shown.
@@ -72,6 +81,7 @@ pako before it is shown.
     node web/test/pako_exact.mjs   # pako vs Python zlib, byte for byte (needs `py`)
     node web/test/png_decode.mjs   # PNG decoder vs Pillow (needs `py` + Pillow)
     node web/test/job.mjs          # job builder, self-test, rollover, eligibility
+    node web/test/fastkernel.mjs   # fast Mojang kernel: table model vs byte-level builder, generated WGSL, equal-length preference
     node web/test/namemc.mjs       # NameMC ids, JS reference vs Python hashlib
     node web/test/browser_test.mjs # Chrome + WebGPU end to end (Mojang and NameMC modes, combined flow), checks the downloads with skinhash.py and namemc_check.py; also imports Dinnerbone by name (a few playerdb/Mojang lookups)
 

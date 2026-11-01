@@ -222,8 +222,9 @@ The same search runs in the browser with WebGPU (`web/`, start with `py web/serv
   in for zlib (byte-identical in 392 test cases). The kernels are WGSL ports of the CUDA finders.
 - **Same safety checks:** the GPU must reproduce CPU test vectors before every search. Every hit is
   re-checked on the CPU, both ids and only invisible pixels changed, before it's offered for download.
-- **Speed:** in Chrome, about 60% of native for Mojang links (the newest native kernel isn't ported
-  to WGSL yet) and about 77% for NameMC.
+- **Speed:** in Chrome, about 78% of native for Mojang links (about 3.7G/s, with the fixed-bit-position
+  kernel generated as WGSL per job; the generic kernel, used as fallback, does about 2.9G/s) and about 77%
+  for NameMC.
 
 The example result in section 5 was made this way.
 

@@ -2,7 +2,7 @@
 import { decodePng, mojangPng, W, H } from "./png.js";
 import { sha256, toHex } from "./hash.js";
 import { prepareSkin, autoChoose, rebuildJob, selfTest, makeTestVectors, makeRng, MAX_K } from "./job.js";
-import { initDevice, webgpuAvailable, GpuJob } from "./gpu.js";
+import { initDevice, webgpuAvailable, prepareGpuJob } from "./gpu.js";
 import { parseHexList, targetList, targetKey, gpuTargets, gpuNmTargets, expectedTries } from "./targets.js";
 import { verifyHit, verifyNmHit, verifyBoth } from "./verify.js";
 import { prepareNameMc, makeNmTests, namemcIdHex } from "./namemc.js";
@@ -313,16 +313,16 @@ async function runMojang(bench, opts) {
       setStatus(`CPU self-test${sets > 1 ? " (value set #" + sets + ")" : ""}...`);
       await new Promise((r) => setTimeout(r, 10));
       const nSelf = selfTest(job, rng, 250);
-      makeTestVectors(job, rng, 24);
+      makeTestVectors(job, rng, 24, 104);   // 24 against full pako, 104 more from the byte-level builder
       setStatus("Compiling GPU kernel and checking it against the CPU...");
-      g = new GpuJob(device, job, { wg: Number(new URLSearchParams(location.search).get("wg")) || 256 });
-      await g.build();
-      const gate = await g.gate();
+      const prepared = await prepareGpuJob(device, job, { wg: Number(new URLSearchParams(location.search).get("wg")) || 256 });
+      g = prepared.g;
+      const gate = prepared.gate;
       S.gate = { ...gate, selfTest: nSelf };
       if (!gate.ok) throw new Error(`GPU check failed: ${gate.bad} of ${gate.n} test vectors differ from the CPU (${gate.detail}). Search not started.`);
       const gt = gpuTargets(wantNow()); g.setTargets(gt.pats, gt.zeros);
       if (bench && sets === 1) setTimeout(() => (S.stop = true), 10000);
-      setStatus(`${bench ? "Benchmark" : "Searching"}. GPU matches CPU on ${gate.n}/${gate.n} test vectors. ${job.K} search pixels, ${job.nblk} SHA block${job.nblk > 1 ? "s" : ""}.`, "ok");
+      setStatus(`${bench ? "Benchmark" : "Searching"}. GPU matches CPU on ${gate.n}/${gate.n} test vectors. ${job.K} search pixels, ${job.nblk} SHA block${job.nblk > 1 ? "s" : ""}, ${gate.kernel} kernel.`, "ok");
       const base = totalTried, tRun = performance.now(); runT0 = tRun;
       const res = await g.run(rng, {
         shouldStop: () => S.stop,

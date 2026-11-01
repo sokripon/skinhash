@@ -1,5 +1,6 @@
 // WebGPU runner: device setup, correctness gate, pipelined search loop.
 import { deriveJob, buildConsts, genShader, MAXHITS, MAXPAT, HITS_WORDS, NTEST_STRIDE } from "./wgsl.js";
+import { deriveFast, buildFastConsts, genFastShader } from "./wgslfast.js";
 import { RIN, NPERM, permCount, outerDigits } from "./job.js";
 
 export function webgpuAvailable() {
@@ -17,35 +18,65 @@ export async function initDevice() {
 }
 
 const U = GPUBufferUsage;
-const MAX_BATCH = 1 << 23;   // threads per dispatch (x 24 candidates each)
+const MAX_BATCH = 1 << 24;   // threads per dispatch (x 24 candidates each)
+// Dispatches should take about 50-100 ms: grow the batch below 45 ms, shrink it above 100 ms. A halved batch of a
+// 100+ ms dispatch is still above 45 ms, so the size does not oscillate.
+const GROW_BELOW_MS = 45, SHRINK_ABOVE_MS = 100;
+
+// Compiled pipelines per device, keyed by the generated source (the layout and the constants baked into it).
+const pipelineCache = new WeakMap();
+async function compilePipelines(d, code) {
+  let cache = pipelineCache.get(d);
+  if (!cache) pipelineCache.set(d, cache = new Map());
+  if (cache.has(code)) return cache.get(code);
+  d.pushErrorScope("validation");
+  const module = d.createShaderModule({ code });
+  const info = await module.getCompilationInfo();
+  const errs = info.messages.filter((m) => m.type === "error");
+  if (errs.length) {
+    await d.popErrorScope();
+    const src = code.split("\n");
+    throw new Error("WGSL compile error: " + errs.map((m) => `${m.lineNum}:${m.linePos} ${m.message} | ${src[m.lineNum - 1] || ""}`).join("\n"));
+  }
+  const search = await d.createComputePipelineAsync({ layout: "auto", compute: { module, entryPoint: "search_main" } });
+  const test = await d.createComputePipelineAsync({ layout: "auto", compute: { module, entryPoint: "test_main" } });
+  const err = await d.popErrorScope();
+  if (err) throw new Error("WebGPU validation error: " + err.message);
+  const r = { search, test };
+  cache.set(code, r);
+  if (cache.size > 4) cache.delete(cache.keys().next().value);
+  return r;
+}
 
 export class GpuJob {
-  constructor(device, job, { wg = 256 } = {}) {
+  constructor(device, job, { wg = 256, kernel = "auto" } = {}) {
     this.device = device; this.job = job; this.wg = wg;
     this.D = deriveJob(job);
-    const { off, buf } = buildConsts(this.D, job.nblk);
-    this.consts = buf;
+    this.kernel = "generic"; this.whyGeneric = kernel === "generic" ? "forced" : "";
+    if (kernel !== "generic") {
+      const F = deriveFast(job, this.D);
+      if (F.ok) {
+        this.F = F; this.kernel = "fast";
+        const { buf, off } = buildFastConsts(this.D, F);
+        this.consts = buf;
+        this.wgsl = genFastShader(job, this.D, F, off, wg);
+      } else this.whyGeneric = F.why;
+    }
+    if (this.kernel === "generic") {
+      const { off, buf } = buildConsts(this.D, job.nblk);
+      this.consts = buf;
+      this.wgsl = genShader(this.D, off, wg, job.tests.length);
+    }
     this.nTests = job.tests.length;
-    this.wgsl = genShader(this.D, off, wg, this.nTests);
     this.pats = []; this.zeros = 0;
   }
 
   async build() {
     const d = this.device;
-    d.pushErrorScope("validation");
-    const module = d.createShaderModule({ code: this.wgsl });
-    const info = await module.getCompilationInfo();
-    const errs = info.messages.filter((m) => m.type === "error");
-    if (errs.length) {
-      const src = this.wgsl.split("\n");
-      throw new Error("WGSL compile error: " + errs.map((m) => `${m.lineNum}:${m.linePos} ${m.message} | ${src[m.lineNum - 1] || ""}`).join("\n"));
-    }
-    this.search = await d.createComputePipelineAsync({ layout: "auto", compute: { module, entryPoint: "search_main" } });
-    this.test = await d.createComputePipelineAsync({ layout: "auto", compute: { module, entryPoint: "test_main" } });
-    const err = await d.popErrorScope();
-    if (err) throw new Error("WebGPU validation error: " + err.message);
-
+    const { search, test } = await compilePipelines(d, this.wgsl);
+    this.search = search; this.test = test;
     const mk = (size, usage) => d.createBuffer({ size: Math.max(16, size), usage });
+    this.dummy = mk(64, U.STORAGE);   // the fast kernel's shared code path binds all five buffers in both entry points
     this.kbuf = mk(this.consts.byteLength, U.STORAGE | U.COPY_DST);
     d.queue.writeBuffer(this.kbuf, 0, this.consts);
     this.ptbuf = mk((2 + 5 * MAXPAT) * 4, U.STORAGE | U.COPY_DST);
@@ -56,7 +87,8 @@ export class GpuJob {
       const staging = mk(HITS_WORDS * 4, U.MAP_READ | U.COPY_DST);
       const bind = d.createBindGroup({ layout: this.search.getBindGroupLayout(0), entries: [
         { binding: 0, resource: { buffer: this.kbuf } }, { binding: 1, resource: { buffer: this.ptbuf } },
-        { binding: 2, resource: { buffer: dp } }, { binding: 3, resource: { buffer: hits } }] });
+        { binding: 2, resource: { buffer: dp } }, { binding: 3, resource: { buffer: hits } },
+        ...(this.kernel === "fast" ? [{ binding: 4, resource: { buffer: this.dummy } }] : [])] });
       return { dp, hits, staging, bind };
     });
   }
@@ -88,10 +120,11 @@ export class GpuJob {
     const bst = mk(nt * 32, U.MAP_READ | U.COPY_DST);
     d.queue.writeBuffer(bdp, 0, tdp);
     const bind = d.createBindGroup({ layout: this.test.getBindGroupLayout(0), entries: [
-      { binding: 0, resource: { buffer: this.kbuf } }, { binding: 2, resource: { buffer: bdp } }, { binding: 4, resource: { buffer: bout } }] });
+      { binding: 0, resource: { buffer: this.kbuf } }, { binding: 2, resource: { buffer: bdp } }, { binding: 4, resource: { buffer: bout } },
+      ...(this.kernel === "fast" ? [{ binding: 1, resource: { buffer: this.ptbuf } }, { binding: 3, resource: { buffer: this.dummy } }] : [])] });
     const enc = d.createCommandEncoder();
     const pass = enc.beginComputePass();
-    pass.setPipeline(this.test); pass.setBindGroup(0, bind); pass.dispatchWorkgroups(1);
+    pass.setPipeline(this.test); pass.setBindGroup(0, bind); pass.dispatchWorkgroups(Math.ceil(nt / 64));
     pass.end();
     enc.copyBufferToBuffer(bout, 0, bst, 0, nt * 32);
     d.queue.submit([enc.finish()]);
@@ -157,8 +190,8 @@ export class GpuJob {
       const now = performance.now();
       const dt = now - Math.max(lastDone, rec.t0);
       lastDone = now;
-      if (dt < 30 && batch * 2 <= Math.min(MAX_BATCH, 65535 * this.wg)) batch *= 2;
-      else if (dt > 120 && batch > 4096) batch = Math.floor(batch / 2);
+      if (dt < GROW_BELOW_MS) batch = Math.min(batch * 2, MAX_BATCH, 65535 * this.wg);
+      else if (dt > SHRINK_ABOVE_MS && batch > 4096) batch = Math.floor(batch / 2);
       tried += rec.n * NPERM;
       best = Math.max(best, u[1]);
       const nh = u[0];
@@ -173,6 +206,36 @@ export class GpuJob {
   }
 
   destroy() {
-    for (const b of [this.kbuf, this.ptbuf, ...(this.slots || []).flatMap((s) => [s.dp, s.hits, s.staging])]) b?.destroy();
+    for (const b of [this.kbuf, this.ptbuf, this.dummy, ...(this.slots || []).flatMap((s) => [s.dp, s.hits, s.staging])]) b?.destroy();
   }
+}
+
+/**
+ * Build the GPU job for `job` and run the correctness gate. The fast kernel is tried first when the job qualifies;
+ * if it does not reproduce every CPU test vector, the generic kernel is built and gated instead. Returns
+ * {g, gate} with gate.kernel = "fast" | "generic"; gate.ok is false only if every kernel tried failed
+ * (g is then the last one, the caller must not search with it).
+ */
+export async function prepareGpuJob(device, job, opts = {}) {
+  const tryKernel = async (kernel) => {
+    const g = new GpuJob(device, job, { ...opts, kernel });
+    try {
+      await g.build();
+      const gate = await g.gate();
+      return { g, gate: { ...gate, kernel: g.kernel } };
+    } catch (e) {
+      g.destroy();
+      if (kernel === "generic") throw e;
+      console.warn("fast kernel failed to build, using the generic kernel:", e);
+      return null;
+    }
+  };
+  let r = await tryKernel("auto");
+  if (r && r.g.kernel === "fast" && !r.gate.ok) {
+    console.warn(`fast kernel failed the gate (${r.gate.bad}/${r.gate.n}: ${r.gate.detail}), falling back to the generic kernel`);
+    r.g.destroy();
+    r = null;
+  }
+  if (!r) r = await tryKernel("generic");
+  return r;
 }

@@ -63,7 +63,7 @@ try {
   await waitIdle(60000);
   const b = await page.evaluate(() => ({ gate: __skinhash.gate, bench: __skinhash.bench, err: __skinhash.error }));
   check(b.gate?.ok, `correctness gate: GPU reproduced ${b.gate?.n}/${b.gate?.n} CPU test vectors; CPU self-test ${b.gate?.selfTest}`);
-  check(!!b.bench, `benchmark rate = ${b.bench ? (b.bench.rate / 1e9).toFixed(3) + " G/s" : "n/a"} over ${b.bench?.secs?.toFixed(1)} s (${b.bench?.tried} tried); native CUDA reference 3.85 G/s`);
+  check(!!b.bench, `benchmark rate = ${b.bench ? (b.bench.rate / 1e9).toFixed(3) + " G/s" : "n/a"} over ${b.bench?.secs?.toFixed(1)} s (${b.bench?.tried} tried); native CUDA reference 4.8 G/s`);
   if (b.err) console.log("  error:", b.err);
 
   // 2. searches

@@ -95,6 +95,32 @@ export function buildConsts(D, nblk) {
 const hex = (v) => `0x${(v >>> 0).toString(16)}u`;
 const ror = (x, n) => `((${x} >> ${n}u) | (${x} << ${32 - n}u))`;
 
+/** Target matching and hit recording for one candidate; expects s0..s7 (digest words), gid, tt, zbest in scope. */
+export function hitCode() {
+  return `let zn = select(select(16u, 8u + (countLeadingZeros(s1) >> 2u), s1 != 0u), countLeadingZeros(s0) >> 2u, s0 != 0u);
+    zbest = max(zbest, zn);
+    var hit = PT[1] != 0u && zn >= PT[1];
+    let np = PT[0];
+    if (np != 0u) {
+      var th = 0u; var tl = 0u;
+      if (s0 != 0u) { let sh = countLeadingZeros(s0) & 28u; th = shl2(s0, s1, sh); tl = shl2(s1, s2, sh); }
+      else if (s1 != 0u) { let sh = countLeadingZeros(s1) & 28u; th = shl2(s1, s2, sh); tl = shl2(s2, s3, sh); }
+      else if (s2 != 0u) { let sh = countLeadingZeros(s2) & 28u; th = shl2(s2, s3, sh); tl = s3 << sh; }
+      else if (s3 != 0u) { let sh = countLeadingZeros(s3) & 28u; th = s3 << sh; }
+      for (var i = 0u; i < np; i++) {
+        let pb = 2u + 5u * i;
+        let suf = PT[pb + 4u] != 0u;
+        let vh = select(th, s6, suf);
+        let vl = select(tl, s7, suf);
+        if ((vh & PT[pb + 2u]) == PT[pb] && (vl & PT[pb + 3u]) == PT[pb + 1u]) { hit = true; break; }
+      }
+    }
+    if (hit) {
+      let pos = atomicAdd(&HITS[0], 1u);
+      if (pos < ${MAXHITS}u) { atomicStore(&HITS[2u + 2u * pos], gid); atomicStore(&HITS[3u + 2u * pos], tt); }
+    }`;
+}
+
 function emit(lo, hi, nb, nw, crc, comb, clen) {
   return `{
     let c_ = ${comb}; let l_ = ${clen};
@@ -210,28 +236,7 @@ function runOuter(name, test, D, off, WGs) {
 `;
     return s;
   }
-  s += `    let zn = select(select(16u, 8u + (countLeadingZeros(s1) >> 2u), s1 != 0u), countLeadingZeros(s0) >> 2u, s0 != 0u);
-    zbest = max(zbest, zn);
-    var hit = PT[1] != 0u && zn >= PT[1];
-    let np = PT[0];
-    if (np != 0u) {
-      var th = 0u; var tl = 0u;
-      if (s0 != 0u) { let sh = countLeadingZeros(s0) & 28u; th = shl2(s0, s1, sh); tl = shl2(s1, s2, sh); }
-      else if (s1 != 0u) { let sh = countLeadingZeros(s1) & 28u; th = shl2(s1, s2, sh); tl = shl2(s2, s3, sh); }
-      else if (s2 != 0u) { let sh = countLeadingZeros(s2) & 28u; th = shl2(s2, s3, sh); tl = s3 << sh; }
-      else if (s3 != 0u) { let sh = countLeadingZeros(s3) & 28u; th = s3 << sh; }
-      for (var i = 0u; i < np; i++) {
-        let pb = 2u + 5u * i;
-        let suf = PT[pb + 4u] != 0u;
-        let vh = select(th, s6, suf);
-        let vl = select(tl, s7, suf);
-        if ((vh & PT[pb + 2u]) == PT[pb] && (vl & PT[pb + 3u]) == PT[pb + 1u]) { hit = true; break; }
-      }
-    }
-    if (hit) {
-      let pos = atomicAdd(&HITS[0], 1u);
-      if (pos < ${MAXHITS}u) { atomicStore(&HITS[2u + 2u * pos], gid); atomicStore(&HITS[3u + 2u * pos], tt); }
-    }
+  s += `    ${hitCode()}
   }
   if (zbest > 0u && zbest > atomicLoad(&HITS[1])) { atomicMax(&HITS[1], zbest); }
 }
@@ -277,11 +282,12 @@ fn search_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_
 }
 
 @compute @workgroup_size(${TW})
-fn test_main(@builtin(local_invocation_index) li: u32) {
+fn test_main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_index) li: u32) {
   load_shared(li, ${TW}u);
-  if (li < ${nTests}u) {
-    let b = li * ${NTEST_STRIDE}u;
-    run_test(b, DP[b + 16u], DP[b + 17u], DP[b + 17u] + 1u, li);
+  let gi = wid.x * ${TW}u + li;
+  if ((gi + 1u) * ${NTEST_STRIDE}u <= arrayLength(&DP)) {
+    let b = gi * ${NTEST_STRIDE}u;
+    run_test(b, DP[b + 16u], DP[b + 17u], DP[b + 17u] + 1u, gi);
   }
 }
 `;

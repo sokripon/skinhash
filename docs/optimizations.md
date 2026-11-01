@@ -300,7 +300,18 @@ third Adler/CRC word as constants (≈10 instructions) and folding round WI into
 
 Block size and occupancy (`MINB` 2/3/4: 4.65-4.79 G/s) are within noise, so 3 stays.
 
-The WGSL kernel (`web/js`) is unchanged: this step is native only.
+**WGSL port.** The browser page has the same kernel (`web/js/wgslfast.js`). WGSL has no templates, so the shader
+text is generated per job in JS with `(WI, KB)`, the shift of the Adler/CRC bytes, the code length and all job
+constants (mid-state, constant message words, `K + w` sums, CRC constants) written in as literals, with the constant
+parts of the schedule folded in JS (WGSL rejects overflowing constant expressions). The outer positions are unrolled,
+so the bit position, the word flushes and the CRC steps are static and the image needs no dynamically indexed
+array. The per-(position, value) tables live in workgroup memory, the k-th free value is found with a branch-free
+popcount search instead of a loop, and the 24 orderings stay a runtime loop with a per-ordering shift word. It is
+used for one-block jobs with equal code lengths (the job builder prefers them as `--auto` does); every other job,
+and any job whose fast kernel fails the gate, runs the generic kernel. In Chrome on the RTX 5060 Ti the Mojang rate
+went from 2.9 to about 3.7 G/s (1.31x on steve.png, 1.29x on a NameMC hit made from steve, 1.30x on Dinnerbone,
+three alternating runs each), about 78% of the native 4.8. The browser gate for the fast kernel uses 128 vectors
+(24 against full pako, 104 from the byte-level builder).
 
 ### Gate for the fast kernel
 

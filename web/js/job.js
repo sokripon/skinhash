@@ -310,6 +310,14 @@ export function fastDigest(job, buf) {
   return stateToDigest(s);
 }
 
+/** True when all permuted values (the first min(n, 20)) have the same Huffman code length: every code then sits at a
+ *  fixed bit position and the fast GPU kernel applies (mirrors eq_len in fastfinder.c). */
+export function equalLengths(job) {
+  const m = Math.min(job.n, 20), l = job.tab[job.vals[0]] >>> 16;
+  for (let i = 1; i < m; i++) if ((job.tab[job.vals[i]] >>> 16) !== l) return false;
+  return true;
+}
+
 export function permRaw(job, perm) {
   const raw = Uint8Array.from(job.raw);
   job.knob.forEach((o, i) => { raw[o] = perm[i]; });
@@ -366,7 +374,7 @@ export function selfTest(job, rng, N = 250) {
 }
 
 /** CPU test vectors for the GPU gate: idx (BigInt) and SHA-256 of the full PNG. */
-export function makeTestVectors(job, rng, count = 24) {
+export function makeTestVectors(job, rng, count = 24, hostExtra = 0) {
   const mf = permCount(job);
   const tests = [];
   for (let t = 0; t < count; t++) {
@@ -379,6 +387,13 @@ export function makeTestVectors(job, rng, count = 24) {
     const d2 = fastDigest(job, buf);
     if (sha.some((x, i) => x !== d2[i])) throw new Error("test vector: midstate digest differs");
     tests.push({ idx, sha });
+  }
+  // host-built vectors: the byte-level builder only (already compared with full pako in selfTest and above), so a
+  // hundred more are cheap. Random indices and both ends of the range.
+  for (let t = 0; t < hostExtra; t++) {
+    const idx = t < 8 ? BigInt(t + 2) : t < 16 ? mf - BigInt(t - 5) : rng.big(mf);
+    const { buf } = fastFile(job, decodePerm(job, idx));
+    tests.push({ idx, sha: fastDigest(job, buf) });
   }
   job.tests = tests;
   return tests;
@@ -423,8 +438,10 @@ export async function tuneSearch(prep, rng, kmax, onProgress) {
   return null;
 }
 
-/** Largest K <= kmax whose variable region plus SHA padding fits one block; otherwise length tuning, then the best
- *  2-block config. result.tuning = {K, tries, pixels} when tuning was used. */
+/** Largest K <= kmax whose variable region plus SHA padding fits one block, preferring a value set whose permuted
+ *  values all have the same code length (fast GPU kernel; one-block sets with unequal lengths run on the generic
+ *  kernel and are the fallback, but never below K=5 as that rolls over too often); otherwise length tuning, then the
+ *  best 2-block config. result.tuning = {K, tries, pixels} when tuning was used. */
 export async function autoChoose(prep, rng, { kmax = prep.kmaxUsable, onProgress, tune = true } = {}) {
   let fb = null, lastErr = null;
   for (let K = kmax; K >= MIN_K; K--) {
@@ -432,13 +449,15 @@ export async function autoChoose(prep, rng, { kmax = prep.kmaxUsable, onProgress
     for (let t = 0; t < AUTO_TRIES; t++) {
       let job;
       try { job = setupFast(prep, K, pickVals(prep, K, rng)); ok++; } catch (e) { if (!(e instanceof Unsupported)) throw e; lastErr = e.message; if (t === 0 && /byte values are unused/.test(e.message)) break; continue; }
-      if (job.nblk === 1) return { job, K, nblk: 1 };
-      if (!fb || (K === fb.K && job.nblk < fb.nblk)) fb = { job, K, nblk: job.nblk };
+      const eq = equalLengths(job);
+      if (job.nblk === 1 && eq) return { job, K, nblk: 1 };
+      const score = job.nblk * 2 + (eq ? 0 : 1);   // one block with unequal lengths still beats two blocks
+      if (!fb || (K === fb.K && score < fb.score)) fb = { job, K, nblk: job.nblk, score };
       if (t % 20 === 19) { onProgress?.(`searching a one-block layout (K=${K}, try ${t + 1}/${AUTO_TRIES})`); await tick(); }
     }
     if (fb && K <= fb.K - 2) break;
   }
-  if (tune && kmax >= MIN_K) {
+  if (tune && kmax >= MIN_K && (!fb || fb.nblk > 1)) {
     onProgress?.("length tuning");
     const tuning = await tuneSearch(prep, rng, kmax, onProgress);
     if (tuning) {
@@ -450,16 +469,18 @@ export async function autoChoose(prep, rng, { kmax = prep.kmaxUsable, onProgress
   return fb;
 }
 
-/** New random value set with the same K, preferring the same block count (used at rollover). */
+/** New random value set with the same K, preferring the same block count and equal code lengths (used at rollover). */
 export async function rebuildJob(prep, rng, K, wantBlk) {
   let best = null;
   for (let t = 0; t < AUTO_TRIES * 4; t++) {
     let job;
     try { job = setupFast(prep, K, pickVals(prep, K, rng)); } catch (e) { if (e instanceof Unsupported) continue; throw e; }
-    if (job.nblk <= wantBlk) return job;
-    if (!best || job.nblk < best.nblk) best = job;
+    const eq = equalLengths(job);
+    if (job.nblk <= wantBlk && eq) return job;
+    const score = (job.nblk <= wantBlk ? 0 : job.nblk * 2) + (eq ? 0 : 1);
+    if (!best || score < best.score) best = { job, score };
     if (t % 50 === 49) await tick();
   }
   if (!best) throw new Unsupported("could not build a new value set");
-  return best;
+  return best.job;
 }

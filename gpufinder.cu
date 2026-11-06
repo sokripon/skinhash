@@ -1303,7 +1303,11 @@ int main(int argc, char **argv) {
                     }
                     sr.nrec = k;
                 }
-                if (!tw && !sr.nrec) { fprintf(stderr, "gpufinder: GPU hit idx %llu fails CPU re-check (ignored)\n", (unsigned long long)idx); continue; }
+                if (!tw && !sr.nrec) {
+                    if (!stat_any_record(g_sl.data(), (int)g_sl.size(), d))   /* else: a record beaten in the same launch */
+                        fprintf(stderr, "gpufinder: GPU hit idx %llu fails CPU re-check (ignored)\n", (unsigned long long)idx);
+                    continue;
+                }
                 char hex[65]; hexify(d, hex);
                 const char *url = hex;
                 while (*url == '0' && url[1]) url++;

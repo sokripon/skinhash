@@ -84,7 +84,7 @@ Options shared by the search commands (`mojang`, `namemc`, `both`):
 | `--unused-only` | only pixels no model face samples; incompatible with the Mojang fast modes |
 | `--tail-pixels N` | pixels permuted by Mojang fast mode (default 6) |
 | `--no-watermark` | skip the invisible watermark |
-| `-o, --out DIR` | output directory |
+| `-o, --out DIR` | output directory. It only receives verified results (hit skins, `records/`, `records.json`, `hits.csv`); the finders work in `DIR/.pending`, which is removed when the program exits |
 | `--threads N`, `--seed N` | CPU threads; start seed |
 
 Prefixes are hex, at most 16 digits. Targets of one command are alternatives: a hit matches any of them.

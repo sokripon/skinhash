@@ -556,3 +556,17 @@ static inline void stat_find(const sline_t *ls, int n, const uint8_t *dg, const 
         else if (st_beats(ls[i].t[ls[i].rec_term].rec, v, best[i])) { r->rline[r->nrec] = i; r->rval[r->nrec++] = v; }
     }
 }
+
+/* 1 if some record line holds for this digest. A GPU record candidate that no longer beats the best (another one of
+   the same launch was better) is not an error. */
+static inline int stat_any_record(const sline_t *ls, int n, const uint8_t *dg) {
+    if (!n) return 0;
+    const int L = ls[0].width;
+    uint8_t nib[64];
+    for (int b = 0; b < L / 2; b++) { nib[2*b] = dg[b] >> 4; nib[2*b+1] = dg[b] & 15; }
+    for (int i = 0; i < n; i++) {
+        int v;
+        if (ls[i].rec_term >= 0 && st_eval(&ls[i], nib, &v)) return 1;
+    }
+    return 0;
+}

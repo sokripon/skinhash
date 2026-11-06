@@ -15,6 +15,7 @@ The searches drive the native finders (hashfinder, fastfinder, gpufinder, namemc
 built with build.ps1) and verify every hit. See README.md and docs/how-it-works.md.
 """
 import argparse
+import atexit
 import csv
 import hashlib
 import json
@@ -254,8 +255,14 @@ def run_finder(cmd, rgba, on_hit=None, verifier=None):
     # stderr (progress lines) is merged in so it can be reformatted
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     asked_stop = False
+    moved = {}   # file in .pending -> where its verified normal hit was moved (several HIT lines can name one file)
     try:
-        for line in proc.stdout:
+        for raw in proc.stdout:
+            line, src = raw, None
+            if raw.startswith("HIT "):
+                src = raw.rsplit("file=", 1)[1].strip()
+                if not raw.split()[1].startswith("record:"):
+                    line = raw.replace(src, moved.get(src, final_path(src)))   # where the hit will be kept
             print(pretty_progress(line), end="", flush=True)
             if ODDS and not ODDS.get("shown"):
                 m = PROGRESS_RE.match(line)
@@ -275,25 +282,30 @@ def run_finder(cmd, rgba, on_hit=None, verifier=None):
                     LAST_ROLLOVER = (int(kv["tried"]), float(kv["secs"]))
                 except (KeyError, ValueError):
                     LAST_ROLLOVER = None
-            if line.startswith("HIT "):
-                f = line.rsplit("file=", 1)[1].strip()
+            if src is not None:
+                why = raw.split()[1]
+                f = moved.get(src, src)   # where the file is now
                 if RECORDS:
-                    RECORDS.sweep(f)
+                    RECORDS.sweep(src)
                 ok, msg = (verifier or verify)(rgba, f)
                 print(f"  verify: {'OK' if ok else 'FAIL'} {msg}", flush=True)
-                if line.split()[1].startswith("record:") and RECORDS:
+                if why.startswith("record:") and RECORDS:
                     if ok:
-                        RECORDS.hit(line)
+                        RECORDS.hit(raw, f)
                     else:
                         RECORDS.drop(f)
                     continue
+                if ok and f == src and final_path(src) != src:
+                    # a verified normal hit leaves .pending for the output folder
+                    f = moved[src] = final_path(src)
+                    os.replace(src, f)
                 if ok and RECORDS:
                     RECORDS.normal.add(f)
                 if ok:
-                    kv = dict(x.split("=", 1) for x in line.split()[2:] if "=" in x)
-                    log_hit(os.path.dirname(f), 16 if verifier is verify_namemc else 64, line.split()[1], f,
+                    kv = dict(x.split("=", 1) for x in raw.split()[2:] if "=" in x)
+                    log_hit(os.path.dirname(f), 16 if verifier is verify_namemc else 64, why, f,
                             kv.get("sha", ""), kv.get("id", ""))
-                if ok and on_hit and on_hit(line.split()[1], f) and not asked_stop:
+                if ok and on_hit and on_hit(why, f) and not asked_stop:
                     asked_stop = True
                     proc.terminate()
         rc = proc.wait()
@@ -308,6 +320,24 @@ def run_finder(cmd, rgba, on_hit=None, verifier=None):
     if rc in INTERRUPT_CODES or rc & 0xFFFFFFFF in INTERRUPT_CODES:
         stopped()
     return rc
+
+
+PENDING = ".pending"   # the finders' working folder inside OUT: base image, job, and hits until they are verified
+
+
+def pending_dir(outdir):
+    """OUT/.pending, emptied now and removed when the program exits: only verified results stay in OUT."""
+    work = os.path.join(outdir, PENDING)
+    shutil.rmtree(work, ignore_errors=True)
+    os.makedirs(work, exist_ok=True)
+    atexit.register(shutil.rmtree, work, True)
+    return work
+
+
+def final_path(path):
+    """Where a verified normal hit written to OUT/.pending is kept: OUT/<name>."""
+    d = os.path.dirname(path)
+    return os.path.join(os.path.dirname(d), os.path.basename(path)) if os.path.basename(d) == PENDING else path
 
 
 def strip_best(cmd):
@@ -768,12 +798,13 @@ class RecordStore:
                 out += ["--best", str(i), str(b)]
         return out
 
-    def hit(self, line):
-        """A verified 'HIT record:TEXT=VALUE ...' line of a finder. Returns True if it was a new record."""
+    def hit(self, line, path=None):
+        """A verified 'HIT record:TEXT=VALUE ...' line of a finder (path: where its file is now, if not the line's).
+        Returns True if it was a new record."""
         why = line.split()[1][len("record:"):]
         text, _, value = why.rpartition("=")
         kv = dict(x.split("=", 1) for x in line.split()[2:] if "=" in x)
-        path, idd = line.rsplit("file=", 1)[1].strip(), kv.get("id", "")
+        path, idd = path or line.rsplit("file=", 1)[1].strip(), kv.get("id", "")
         pl = self.lines.get(text)
         if pl is None or not value.lstrip("-").isdigit():
             return False
@@ -882,7 +913,8 @@ def mojang_search(path, targets, count=1, every=False, engine="auto", no_generic
     name = os.path.splitext(os.path.basename(path))[0]
     outdir = out or os.path.join(HERE, "found", name)
     os.makedirs(outdir, exist_ok=True)
-    rawp = os.path.join(outdir, "base.raw")
+    work = pending_dir(outdir)
+    rawp = os.path.join(work, "base.raw")
     with open(rawp, "wb") as f:
         f.write(raw_scanlines(rgba))
     print(f"original id {texture_id(mojang_png(orig))}; knob pixels {used}", flush=True)
@@ -916,18 +948,18 @@ def mojang_search(path, targets, count=1, every=False, engine="auto", no_generic
         if mode in ("gpu", "cpu"):
             if mode == "gpu":
                 tp = tuning_pixels(rgba, set(wm) | set(tail_px) | MOJANG_TAIL) if LENGTH_TUNING and not unused_only else ()
-                r = gpu_search(rawp, k, outdir, fargs, orig, EXT, on_hit, tp)
+                r = gpu_search(rawp, k, work, fargs, orig, EXT, on_hit, tp)
                 if r:
                     return r
             print(f"fast mode: last {k} pixels", flush=True)
-            rc = run_finder([exe("fastfinder"), rawp, str(k), outdir, *fargs], orig, on_hit)
+            rc = run_finder([exe("fastfinder"), rawp, str(k), work, *fargs], orig, on_hit)
             if rc != 4:
                 return rc
             if no_generic:
                 sys.exit("fastfinder reports this skin's compressed structure is unsupported; "
                          "drop --no-generic to use the generic search")
             print("fastfinder: structure unsupported, falling back to hashfinder", flush=True)
-        return run_finder([exe("hashfinder"), rawp, ",".join(map(str, offs)), outdir, *fargs], orig, on_hit)
+        return run_finder([exe("hashfinder"), rawp, ",".join(map(str, offs)), work, *fargs], orig, on_hit)
 
     extra = finder_extra(threads, seed, bench)
     if bench or not every:
@@ -961,7 +993,8 @@ def namemc_search(path, targets, count=1, every=False, engine="auto", unused_onl
     name = os.path.splitext(os.path.basename(path))[0]
     outdir = out or os.path.join(HERE, "found", name + "_namemc")
     os.makedirs(outdir, exist_ok=True)
-    rgbap = os.path.join(outdir, "base.rgba")
+    work = pending_dir(outdir)
+    rgbap = os.path.join(work, "base.rgba")
     with open(rgbap, "wb") as f:
         f.write(rgba)
     kopt = ",".join(f"{x},{y}" for x, y in knobs)
@@ -993,14 +1026,14 @@ def namemc_search(path, targets, count=1, every=False, engine="auto", unused_onl
                 GPU_FAILED = True
             else:
                 print("gpu mode: namemcgpu", flush=True)
-                rc = run_finder([gpuexe, rgbap, outdir, "-k", kopt, "--render-exe", cpu, *fargs],
+                rc = run_finder([gpuexe, rgbap, work, "-k", kopt, "--render-exe", cpu, *fargs],
                                 orig, on_hit, verify_namemc)
                 if rc in (0, STOPPED_BY_US):
                     return rc
                 print(f"namemcgpu failed (rc={rc}, 5 = correctness gate failed); falling back to CPU", flush=True)
                 GPU_FAILED = True
         print("cpu mode: namemcfinder", flush=True)
-        return run_finder([cpu, rgbap, outdir, "-k", kopt, *fargs], orig, on_hit, verify_namemc)
+        return run_finder([cpu, rgbap, work, "-k", kopt, *fargs], orig, on_hit, verify_namemc)
 
     extra = finder_extra(threads, seed, bench)
     if bench or not every:

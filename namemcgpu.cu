@@ -698,7 +698,13 @@ int main(int argc, char **argv) {
                     }
                     sr.nrec = k;
                 }
-                if (!tw && !sr.nrec) { fprintf(stderr, "namemcgpu: GPU hit counter %llu fails CPU re-check (ignored)\n", (unsigned long long)c); continue; }
+                if (!tw && !sr.nrec) {
+                    u8 b8[8];
+                    for (int i = 0; i < 8; i++) b8[i] = (u8)(id >> (56 - 8 * i));
+                    if (!stat || !stat_any_record(g_sl.data(), (int)g_sl.size(), b8))   /* else: beaten in the same launch */
+                        fprintf(stderr, "namemcgpu: GPU hit counter %llu fails CPU re-check (ignored)\n", (unsigned long long)c);
+                    continue;
+                }
                 char hex[65], id16[17];
                 for (int i = 0; i < 32; i++) snprintf(hex + 2 * i, 3, "%02x", sha[i]);
                 snprintf(id16, sizeof id16, "%016llx", (unsigned long long)id);

@@ -345,6 +345,41 @@ word and value). About a quarter of the digests pass it, so almost every warp st
 result was slower (0.84-0.85 against 0.87). Replacing the per-offset branch by the `min` fold made no measurable
 difference (0.86-0.87 either way).
 
+### Cost of patterns
+
+`-m PATTERN` (see the README) compiles every pattern to one prefilter: an anchored nibble mask over the digest words,
+or one sliding window of up to 8 + 8 digits. Sliding windows go into the contains table and use the contains code
+(the table now has a first offset and a "after the leading zeros" flag per entry, checked only in the second pass).
+Anchored masks are a second table: per entry `acc |= (s[k] ^ value[k]) & mask[k]` over the 8 digest words (two LOP3
+each, constants straight from the constant bank). The kernels are templates on two flags, sliding check and anchored
+check, so a search without them compiles exactly as before; this doubles the fast kernel instantiations (24 layouts x 4
+search variants + 24 gate kernels): the build takes longer and gpufinder.exe grows from 7.2 to 11.8 MB.
+The host re-checks the full pattern (`pattern.h`, `mpat_find`) for every candidate the GPU reports.
+
+The first version put the second pass of the contains check (other 8 digits, range) inline with the first; with the new
+range word the contains kernel ran 3-5% slower than before. Moving the second pass into a `__noinline__` function
+(it runs about once per 2^32 windows) brought it back to the old speed.
+
+Measured with `gpufinder -b` / `namemcgpu -b` on one fixed job (steve.png, K=5, fast kernel WI=6 KB=8), three
+alternating runs, the old exes (before this change) against the new ones, median in G/s:
+
+| Targets | Mojang before | Mojang after | NameMC before | NameMC after |
+|---|---|---|---|---|
+| none (benchmark) | 4.66 | 4.62 | 3.03 | 2.99 |
+| `-p c0ffee` | 4.55 | 4.54 | 2.98 | 2.98 |
+| `-z 12` | 4.58 | 4.64 | 3.04 | 2.99 |
+| `-c c0ffee` | 4.07 | 4.10 | 2.94 | 2.90 |
+| `-m ^0{12} -m ^????0{12} -m c0ffee$` (3 anchored) | | 4.45 | | 2.94 |
+| `-m c0ffee12` (1 unanchored) | | 4.12 | | 2.90 |
+| `-m ^cafe*babe$` (anchored over words 0 and 7) | | 4.58 | | 2.97 |
+| `-m ?l{8}` (unanchored, 8 bits per window) | | 3.76 | | 2.87 |
+
+The existing targets are unchanged within the run-to-run spread (about ±2%). An anchored pattern costs about 1-1.5%
+on Mojang (NameMC: anchored masks join the prefix table, about the cost of a prefix), an unanchored one costs what a
+contains pattern costs (about 12% on Mojang, 3% on NameMC). `?l{8}` is a true match about every 45 candidates and
+passes its prefilter every 4-5 candidates, so the hit buffer (4096 per launch) overflows on every launch and the host
+spends its time re-checking; the rate shown is the GPU side only. The CLI warns about such patterns.
+
 ## Rejected ideas
 
 | Idea | Why not |

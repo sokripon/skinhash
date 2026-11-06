@@ -24,9 +24,10 @@
  * that exist). The gate runs the fast kernel; if it ever differs from the reference the generic kernel
  * takes over. --generic or GPUFINDER_GENERIC=1 forces the generic kernel (A/B runs).
  *
- * usage: gpufinder job.bin OUTDIR [-p HEX]... [-s HEX]... [-c HEX]... [-z N] [-S SEED] [-n N] [-b] [--generic]
+ * usage: gpufinder job.bin OUTDIR [-p HEX]... [-s HEX]... [-c HEX]... [-m PATTERN]... [-z N] [-S SEED] [-n N] [-b] [--generic]
  *                  [--tried-offset N] [--time-offset S] [--bench-secs S]
- *   -p/-s/-z given here replace those stored in the job.
+ *   -p/-s/-z given here replace those stored in the job. -m patterns (pattern.h) compile to an anchored mask
+ *   (c_am) or a sliding window (the contains table c_cp); the host re-checks the full pattern for every hit.
  * exit codes: 0 ok, 1 usage/job error, 5 correctness gate failed, 6 CUDA error / no device,
  *             7 permutation space of this value set exhausted. Prints "ROLLOVER tried=.. secs=.." on
  *               stdout; the caller dumps a new job and continues with --tried-offset/--time-offset.
@@ -41,12 +42,14 @@
 #include <algorithm>
 #include <type_traits>
 #include <cuda_runtime.h>
+#include "pattern.h"
 
 #define MAXK 20
 #define MAXN 60
 #define MAXBLK 8
 #define MAXPAT 64
-#define MAXCONT 16
+#define MAXCONT 32            /* sliding entries: -c patterns and sliding -m prefilters */
+#define MAXAM 64              /* anchored -m prefilters */
 #define MAXHITS 4096
 #ifndef RIN
 #define RIN 4                 /* inner (cached) permutation positions; must equal fastfinder GPU_R */
@@ -127,9 +130,10 @@ static bool parse_pat(const char *hex, int suffix, Pat &p) {
     return true;
 }
 
-/* "contains" pattern: a hex string anywhere in the id. p1/m1 = digits 1-8, p2/m2 = digits 9-16, each
- * left-aligned in a 32-bit word; lim = 64 - n is the last digit offset at which the pattern still fits. */
-struct CPat { u32 p1, m1, p2, m2, lim, n; char text[20]; };
+/* "contains" pattern / sliding prefilter: p1/m1 = digits 1-8, p2/m2 = digits 9-16, each left-aligned in a 32-bit
+ * word; lim = the last digit offset of the window; lo = first offset (bits 0-15) plus bit 16 = "after the leading
+ * zeros" (a contains pattern: lim = 64 - n, lo = 0 | 1 << 16). */
+struct CPat { u32 p1, m1, p2, m2, lim, lo, n; char text[20]; };
 static bool parse_contains(const char *hex, CPat &c) {
     size_t n = strlen(hex);
     if (n == 0 || n > 16) return false;
@@ -144,7 +148,7 @@ static bool parse_contains(const char *hex, CPat &c) {
         *w |= (u32)v << sh; *m |= 0xFu << sh;
         c.text[i] = (char)(ch | 0x20);
     }
-    c.n = (u32)n; c.lim = 64 - (u32)n;
+    c.n = (u32)n; c.lim = 64 - (u32)n; c.lo = 1u << 16;
     return true;
 }
 
@@ -170,7 +174,9 @@ __constant__ u8 c_perm[NPERM * RIN];
 __constant__ u64 c_pval[MAXPAT], c_pmask[MAXPAT];
 __constant__ u32 c_psuf[MAXPAT];
 __constant__ u32 c_ncont;
-__constant__ u32 c_cp[MAXCONT * 5];      /* per contains pattern: p1, m1, p2, m2, lim */
+__constant__ u32 c_cp[MAXCONT * 6];      /* per sliding entry: p1, m1, p2, m2, lim, lo */
+__constant__ u32 c_na;
+__constant__ u32 c_am[MAXAM * 16];       /* per anchored entry: 8 masks, 8 values (digest words) */
 __constant__ u32 c_K256[64] = {
     0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,
     0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,
@@ -237,9 +243,29 @@ __device__ __forceinline__ void sha_block(u32 st[8], const u32 *img) {
  * and compares it with the first (up to) 8 pattern digits; IMNMX folds the 64 results into one word that is 0 iff
  * some window matched. Only then (1 in 16^min(n,8) per offset, never in practice for 4+ digits) does the second
  * pass look at the other 8 digits and the range. */
+/* Second pass of contains_hit for entry i, only after some window matched: the other 8 digits and the range
+ * lo <= o <= lim (bit 16 of lo adds zl). Kept out of line so the hot first pass compiles as tight as possible. */
+__device__ __noinline__ bool contains_confirm(u32 s0, u32 s1, u32 s2, u32 s3, u32 s4, u32 s5, u32 s6, u32 s7, u32 i, u32 zl) {
+    const u32 s[8] = {s0, s1, s2, s3, s4, s5, s6, s7};
+    const u32 p1 = c_cp[i * 6], m1 = c_cp[i * 6 + 1], p2 = c_cp[i * 6 + 2], m2 = c_cp[i * 6 + 3], lim = c_cp[i * 6 + 4];
+    const u32 lw = c_cp[i * 6 + 5], lo = (lw & 0xFFFFu) + ((lw >> 16) ? zl : 0u);
+#pragma unroll
+    for (int o = 0; o < 64; o++) {
+        const int w = o >> 3, sh = 4 * (o & 7);
+        const u32 n1 = w + 1 < 8 ? s[w + 1 < 8 ? w + 1 : 7] : 0u;
+        const u32 a = sh ? __funnelshift_l(n1, s[w], sh) : s[w];
+        if (((a ^ p1) & m1) == 0u) {
+            const u32 n2 = w + 2 < 8 ? s[w + 2 < 8 ? w + 2 : 7] : 0u;
+            const u32 b = sh ? __funnelshift_l(n2, n1, sh) : n1;
+            if (((b ^ p2) & m2) == 0u && (u32)o <= lim && (u32)o >= lo) return true;
+        }
+    }
+    return false;
+}
+
 __device__ __forceinline__ bool contains_hit(const u32 (&s)[8], u32 zl) {
     for (u32 i = 0; i < c_ncont; i++) {
-        const u32 p1 = c_cp[i * 5], m1 = c_cp[i * 5 + 1], p2 = c_cp[i * 5 + 2], m2 = c_cp[i * 5 + 3], lim = c_cp[i * 5 + 4];
+        const u32 p1 = c_cp[i * 6], m1 = c_cp[i * 6 + 1];
         u32 mn = 0xFFFFFFFFu;
 #pragma unroll
         for (int o = 0; o < 64; o++) {
@@ -249,17 +275,18 @@ __device__ __forceinline__ bool contains_hit(const u32 (&s)[8], u32 zl) {
             mn = min(mn, (a ^ p1) & m1);
         }
         if (mn != 0u) continue;
+        if (contains_confirm(s[0], s[1], s[2], s[3], s[4], s[5], s[6], s[7], i, zl)) return true;
+    }
+    return false;
+}
+
+/* Anchored -m prefilters: (digest ^ value) & mask == 0 over the 8 words (two LOP3 per word). */
+__device__ __forceinline__ bool anchored_hit(const u32 (&s)[8]) {
+    for (u32 i = 0; i < c_na; i++) {
+        u32 acc = 0;
 #pragma unroll
-        for (int o = 0; o < 64; o++) {
-            const int w = o >> 3, sh = 4 * (o & 7);
-            const u32 n1 = w + 1 < 8 ? s[w + 1 < 8 ? w + 1 : 7] : 0u;
-            const u32 a = sh ? __funnelshift_l(n1, s[w], sh) : s[w];
-            if (((a ^ p1) & m1) == 0u) {
-                const u32 n2 = w + 2 < 8 ? s[w + 2 < 8 ? w + 2 : 7] : 0u;
-                const u32 b = sh ? __funnelshift_l(n2, n1, sh) : n1;
-                if (((b ^ p2) & m2) == 0u && (u32)o <= lim && (u32)o >= zl) return true;
-            }
-        }
+        for (int k = 0; k < 8; k++) acc |= (s[k] ^ c_am[i * 16 + 8 + k]) & c_am[i * 16 + k];
+        if (acc == 0u) return true;
     }
     return false;
 }
@@ -269,7 +296,7 @@ __device__ __forceinline__ bool contains_hit(const u32 (&s)[8], u32 zl) {
  * TEST: evaluate only ordering t = tlo and write the 8 digest words to out.
  * otherwise: test every candidate against the patterns and record hits.
  */
-template <bool TEST, bool CONT>
+template <bool TEST, bool CONT, bool ANCH>
 __device__ __forceinline__ void run_outer(const BaseDigits &bd, u32 gid, u32 tlo, u32 thi, u64 obase,
                                           const u32 *s_crc, const u32 *s_gt, const u32 *s_tab, const u32 *s_val, u32 *out) {
     u32 img[MAXBLK * 16];
@@ -384,9 +411,10 @@ __device__ __forceinline__ void run_outer(const BaseDigits &bd, u32 gid, u32 tlo
                 if ((vv2 & c_pmask[i]) == c_pval[i]) { hit = true; break; }
             }
         }
-        if (CONT && !hit) {
+        if ((CONT || ANCH) && !hit) {
             u32 s8[8] = {s[0], s[1], s[2], s[3], s[4], s[5], s[6], s[7]};
-            hit = contains_hit(s8, zn);
+            if (ANCH) hit = anchored_hit(s8);
+            if (CONT && !hit) hit = contains_hit(s8, zn);
         }
         if (hit) {
             u32 pos = atomicAdd(&d_nhits, 1u);
@@ -403,13 +431,13 @@ __device__ __forceinline__ void load_shared(u32 *s_crc, u32 *s_gt, u32 *s_tab, u
     __syncthreads();
 }
 
-template <bool CONT>
+template <bool CONT, bool ANCH>
 __global__ void __launch_bounds__(BLOCK, MINB) search_kernel(BaseDigits bd, u64 obase, u32 count) {
     __shared__ u32 s_crc[256], s_gt[6 * 256], s_tab[64], s_val[64];
     load_shared(s_crc, s_gt, s_tab, s_val);
     u32 gid = blockIdx.x * BLOCK + threadIdx.x;
     if (gid >= count) return;
-    run_outer<false, CONT>(bd, gid, 0, NPERM, obase, s_crc, s_gt, s_tab, s_val, nullptr);
+    run_outer<false, CONT, ANCH>(bd, gid, 0, NPERM, obase, s_crc, s_gt, s_tab, s_val, nullptr);
 }
 
 /* gate: thread i evaluates ordering t[i] of outer = (digits bd[i]) + gid[i] */
@@ -419,7 +447,7 @@ __global__ void test_kernel(const BaseDigits *bds, const u32 *gids, const u32 *t
     if ((int)threadIdx.x < nt) {
         u32 s[8];
         BaseDigits bd = bds[threadIdx.x];
-        run_outer<true, false>(bd, gids[threadIdx.x], ts[threadIdx.x], ts[threadIdx.x] + 1, 0, s_crc, s_gt, s_tab, s_val, s);
+        run_outer<true, false, false>(bd, gids[threadIdx.x], ts[threadIdx.x], ts[threadIdx.x] + 1, 0, s_crc, s_gt, s_tab, s_val, s);
         for (int i = 0; i < 8; i++) out[threadIdx.x * 8 + i] = s[i];
     }
 }
@@ -468,7 +496,7 @@ __device__ __forceinline__ void sha_rnd(ShaSt &s, u32 kw) {
     s.h = s.g; s.g = s.f; s.f = s.e; s.e = s.d + t1; s.d = s.c; s.c = s.b; s.b = s.a; s.a = t1 + t2;
 }
 
-template <int WI, int KB, bool TEST, bool CONT>
+template <int WI, int KB, bool TEST, bool CONT, bool ANCH>
 __device__ __forceinline__ void run_outer_fast(const BaseDigits &bd, u32 gid, u32 tlo, u32 thi, u64 obase,
                                                const u32 *s_crc, const u32 *s_gt, const u32 *s_tab, const u32 *s_val,
                                                const uint4 *s_y, const uint2 *s_cb, u32 *out) {
@@ -590,9 +618,10 @@ __device__ __forceinline__ void run_outer_fast(const BaseDigits &bd, u32 gid, u3
                 if ((vv2 & c_pmask[i]) == c_pval[i]) { hit = true; break; }
             }
         }
-        if (CONT && !hit) {
+        if ((CONT || ANCH) && !hit) {
             u32 s8[8] = {s[0], s[1], s[2], s[3], s[4], s[5], s[6], s[7]};
-            hit = contains_hit(s8, zn);
+            if (ANCH) hit = anchored_hit(s8);
+            if (CONT && !hit) hit = contains_hit(s8, zn);
         }
         if (hit) {
             u32 pos = atomicAdd(&d_nhits, 1u);
@@ -607,7 +636,7 @@ __device__ __forceinline__ void load_shared_fast(u32 *s_crc, u32 *s_gt, u32 *s_t
     load_shared(s_crc, s_gt, s_tab, s_val);   /* ends with __syncthreads() */
 }
 
-template <int WI, int KB, bool CONT>
+template <int WI, int KB, bool CONT, bool ANCH>
 __global__ void __launch_bounds__(BLOCK, MINB) search_fast(BaseDigits bd, u64 obase, u32 count) {
     __shared__ u32 s_crc[256], s_gt[6 * 256], s_tab[64], s_val[64];
     __shared__ uint4 s_y[4 * 20];
@@ -615,7 +644,7 @@ __global__ void __launch_bounds__(BLOCK, MINB) search_fast(BaseDigits bd, u64 ob
     load_shared_fast(s_crc, s_gt, s_tab, s_val, s_y, s_cb);
     u32 gid = blockIdx.x * BLOCK + threadIdx.x;
     if (gid >= count) return;
-    run_outer_fast<WI, KB, false, CONT>(bd, gid, 0, NPERM, obase, s_crc, s_gt, s_tab, s_val, s_y, s_cb, nullptr);
+    run_outer_fast<WI, KB, false, CONT, ANCH>(bd, gid, 0, NPERM, obase, s_crc, s_gt, s_tab, s_val, s_y, s_cb, nullptr);
 }
 
 template <int WI, int KB>
@@ -627,14 +656,14 @@ __global__ void test_fast(const BaseDigits *bds, const u32 *gids, const u32 *ts,
     if ((int)threadIdx.x < nt) {
         u32 s[8];
         BaseDigits bd = bds[threadIdx.x];
-        run_outer_fast<WI, KB, true, false>(bd, gids[threadIdx.x], ts[threadIdx.x], ts[threadIdx.x] + 1, 0, s_crc, s_gt, s_tab, s_val, s_y, s_cb, s);
+        run_outer_fast<WI, KB, true, false, false>(bd, gids[threadIdx.x], ts[threadIdx.x], ts[threadIdx.x] + 1, 0, s_crc, s_gt, s_tab, s_val, s_y, s_cb, s);
         for (int i = 0; i < 8; i++) out[threadIdx.x * 8 + i] = s[i];
     }
 }
 
 typedef void (*SearchFn)(BaseDigits, u64, u32);
 typedef void (*TestFn)(const BaseDigits *, const u32 *, const u32 *, u32 *, int);
-struct FastFns { SearchFn search; TestFn test; SearchFn search_c; };
+struct FastFns { SearchFn search[4]; TestFn test; };   /* search[contains | anchored << 1] */
 #if defined(DEV_WI) && !defined(FAST_PAIRS)
 #define FAST_PAIRS(X) X(DEV_WI, DEV_KB)
 #endif
@@ -642,7 +671,9 @@ struct FastFns { SearchFn search; TestFn test; SearchFn search_c; };
 #define FAST_PAIRS(X) X(2,3) X(2,4) X(2,5) X(3,4) X(3,5) X(3,6) X(4,5) X(4,6) X(4,7) X(5,6) X(5,7) X(5,8)     X(6,7) X(6,8) X(6,9) X(7,8) X(7,9) X(7,10) X(8,9) X(8,10) X(8,11) X(9,10) X(9,11) X(10,11)
 #endif
 static bool pick_fast(int WI, int KB, FastFns &f) {
-#define X(a, b) if (WI == a && KB == b) { f.search = search_fast<a, b, false>; f.search_c = search_fast<a, b, true>; f.test = test_fast<a, b>; return true; }
+#define X(a, b) if (WI == a && KB == b) { f.search[0] = search_fast<a, b, false, false>; f.search[1] = search_fast<a, b, true, false>; \
+                                              f.search[2] = search_fast<a, b, false, true>; f.search[3] = search_fast<a, b, true, true>; \
+                                              f.test = test_fast<a, b>; return true; }
     FAST_PAIRS(X)
 #undef X
     return false;
@@ -755,6 +786,7 @@ static std::vector<u8> host_file(const Job &J, u64 idx) {
 static int clz64h(u64 x) { int n = 0; while (!(x >> 63)) { x <<= 1; n++; } return n; }
 
 static std::vector<CPat> g_cont;
+static std::vector<mpat_t> g_mp;
 static const char *match_why(const Job &J, const u8 d[32], std::string &why) {
     u64 hi = 0, mi = 0, lo = 0;
     for (int i = 0; i < 8; i++) { hi = hi << 8 | d[i]; mi = mi << 8 | d[8 + i]; lo = lo << 8 | d[24 + i]; }
@@ -770,11 +802,15 @@ static const char *match_why(const Job &J, const u8 d[32], std::string &why) {
         for (int i = 0; i < 32; i++) { nib[2 * i] = d[i] >> 4; nib[2 * i + 1] = d[i] & 15; }
         while (z < 63 && nib[z] == 0) z++;   /* the link drops the leading zeros: match the trimmed id only */
         for (const CPat &c : g_cont)
-            for (int o = z; o <= 64 - (int)c.n; o++) {
+            for (int o = z; c.n && o <= 64 - (int)c.n; o++) {
                 int k = 0;
                 while (k < (int)c.n && nib[o + k] == (int)(((k < 8 ? c.p1 : c.p2) >> (28 - 4 * (k & 7))) & 15u)) k++;
                 if (k == (int)c.n) { why = std::string("contains:") + c.text; return why.c_str(); }
             }
+    }
+    if (!g_mp.empty()) {
+        int k = mpat_find(g_mp.data(), (int)g_mp.size(), d);
+        if (k >= 0) { why = std::string("match:") + g_mp[k].text; return why.c_str(); }
     }
     int zn = hi ? clz64h(hi) / 4 : 16;
     if (J.zeros && (u32)zn >= J.zeros) { why = "zeros:" + std::to_string(zn); return why.c_str(); }
@@ -982,7 +1018,7 @@ static bool derive_fast(const Job &J, const DevData &D, FastData &F) {
 }
 
 int main(int argc, char **argv) {
-    if (argc < 3) { fprintf(stderr, "usage: gpufinder job.bin OUTDIR [-p HEX]... [-s HEX]... [-c HEX]... [-z N] [-S SEED] [-n N] [-b]\n"); return 1; }
+    if (argc < 3) { fprintf(stderr, "usage: gpufinder job.bin OUTDIR [-p HEX]... [-s HEX]... [-c HEX]... [-m PATTERN]... [-z N] [-S SEED] [-n N] [-b]\n"); return 1; }
     Job J;
     if (!load_job(argv[1], J)) { fprintf(stderr, "gpufinder: cannot read job file %s\n", argv[1]); return 1; }
     std::string outdir = argv[2];
@@ -1003,6 +1039,11 @@ int main(int argc, char **argv) {
             CPat c;
             if (!parse_contains(v, c) || g_cont.size() >= MAXCONT) { fprintf(stderr, "bad -c %s\n", v); return 1; }
             g_cont.push_back(c); i++;
+        }
+        else if (!strcmp(a, "-m") && v) {
+            mpat_t mp; char err[256];
+            if (mpat_parse(v, 64, &mp, err, sizeof err) || g_mp.size() >= MAXAM) { fprintf(stderr, "bad -m %s %s\n", v, err); return 1; }
+            g_mp.push_back(mp); i++;
         }
         else if (!strcmp(a, "-z") && v) { J.zeros = (u32)atoi(v); i++; }
         else if (!strcmp(a, "-S") && v) { seed = strtoull(v, nullptr, 0); i++; }
@@ -1040,7 +1081,7 @@ int main(int argc, char **argv) {
     static FastData FD;
     static u32 gt_generic[6 * 256];
     memcpy(gt_generic, D.gt, sizeof gt_generic);
-    FastFns fns = {nullptr, nullptr, nullptr};
+    FastFns fns = {{nullptr, nullptr, nullptr, nullptr}, nullptr};
     if (!force_generic && derive_fast(J, D, FD)) {
         if (pick_fast(FD.WI, FD.KB, fns)) {
             memcpy(gt_generic, D.gt, sizeof gt_generic);
@@ -1058,16 +1099,34 @@ int main(int argc, char **argv) {
     CK(cudaMemcpyToSymbol(c_pval, pv, sizeof pv));
     CK(cudaMemcpyToSymbol(c_pmask, pm, sizeof pm));
     CK(cudaMemcpyToSymbol(c_psuf, ps, sizeof ps));
+    u32 n_anch = 0;
     {
-        u32 nc = (u32)g_cont.size(), cp[MAXCONT * 5] = {0};
+        /* -m prefilters: anchored masks into c_am, sliding windows after the -c patterns in c_cp; c.n = 0 marks a
+           sliding -m entry (the host re-checks it with mpat_find, not as a contains pattern) */
+        static u32 am[MAXAM * 16];
+        for (const mpat_t &mp : g_mp) {
+            if (mp.sliding) {
+                CPat c; memset(&c, 0, sizeof c);
+                c.p1 = mp.p1; c.m1 = mp.m1; c.p2 = mp.p2; c.m2 = mp.m2; c.lim = (u32)mp.lim; c.lo = (u32)mp.lo | (mp.usezl ? 1u << 16 : 0u);
+                if (g_cont.size() >= MAXCONT) { fprintf(stderr, "gpufinder: too many sliding patterns (max %d with -c)\n", MAXCONT); return 1; }
+                g_cont.push_back(c);
+            } else {
+                for (int k = 0; k < 8; k++) { am[n_anch * 16 + k] = mp.am[k]; am[n_anch * 16 + 8 + k] = mp.av[k]; }
+                n_anch++;
+            }
+        }
+        u32 nc = (u32)g_cont.size(), cp[MAXCONT * 6] = {0};
         for (size_t i = 0; i < g_cont.size(); i++) {
             const CPat &c = g_cont[i];
-            const u32 v[5] = {c.p1, c.m1, c.p2, c.m2, c.lim};
-            memcpy(cp + 5 * i, v, sizeof v);
+            const u32 v[6] = {c.p1, c.m1, c.p2, c.m2, c.lim, c.lo};
+            memcpy(cp + 6 * i, v, sizeof v);
         }
         CK(cudaMemcpyToSymbol(c_ncont, &nc, 4));
         CK(cudaMemcpyToSymbol(c_cp, cp, sizeof cp));
+        CK(cudaMemcpyToSymbol(c_na, &n_anch, 4));
+        CK(cudaMemcpyToSymbol(c_am, am, sizeof am));
     }
+    const int kv = (g_cont.empty() ? 0 : 1) | (n_anch ? 2 : 0);   /* kernel variant: sliding check, anchored check */
 
     const u32 m = J.m;
     const u64 RF = fact_h(RIN), mfact = fact_h((int)m), NOUT = mfact / RF;
@@ -1133,7 +1192,7 @@ int main(int argc, char **argv) {
         int bad = run_gate(fns.test != nullptr);
         if (bad && fns.test) {
             fprintf(stderr, "gate: the fast kernel differs from the reference on %d of %d vectors; using the generic kernel\n", bad, nt);
-            fns.search = nullptr; fns.search_c = nullptr; fns.test = nullptr; FD.why = "fast kernel failed the gate";
+            fns.search[0] = fns.search[1] = fns.search[2] = fns.search[3] = nullptr; fns.test = nullptr; FD.why = "fast kernel failed the gate";
             CK(cudaMemcpyToSymbol(c_gt, gt_generic, sizeof gt_generic));
             bad = run_gate(false);
         }
@@ -1144,10 +1203,10 @@ int main(int argc, char **argv) {
     u64 rng = seed;
     u64 obase = splitmix(rng) % NOUT, covered = 0;
     u64 batch = 1u << 20;   /* threads (outer values) per launch; 24 candidates each */
-    if (fns.search) fprintf(stderr, "kernel: fast (fixed bit positions, WI=%d KB=%d)\n", FD.WI, FD.KB);
+    if (fns.search[0]) fprintf(stderr, "kernel: fast (fixed bit positions, WI=%d KB=%d)\n", FD.WI, FD.KB);
     else fprintf(stderr, "kernel: generic (%s)\n", force_generic ? "forced" : FD.why[0] ? FD.why : "layout not compiled in");
-    fprintf(stderr, "device=%s (sm_%d%d, %d SMs) K=%u nblk=%u m=%u (V0=%u nvar=%u KW=%u) perms/set=%llu patterns=%zu contains=%zu zeros>=%u seed=%llu\n", prop.name,
-            prop.major, prop.minor, prop.multiProcessorCount, J.K, J.nblk, m, J.V0, J.nvar, D.P.KW, mfact, J.pats.size(), g_cont.size(), J.zeros, seed);
+    fprintf(stderr, "device=%s (sm_%d%d, %d SMs) K=%u nblk=%u m=%u (V0=%u nvar=%u KW=%u) perms/set=%llu patterns=%zu contains=%zu match=%zu (anchored %u) zeros>=%u seed=%llu\n", prop.name,
+            prop.major, prop.minor, prop.multiProcessorCount, J.K, J.nblk, m, J.V0, J.nvar, D.P.KW, mfact, J.pats.size(), g_cont.size(), g_mp.size(), n_anch, J.zeros, seed);
     fflush(stderr);
 
     u32 zero = 0;
@@ -1161,9 +1220,11 @@ int main(int argc, char **argv) {
         u64 cnt = std::min<u64>(batch, std::min(NOUT - covered, NOUT - obase));
         BaseDigits bd; digits_of(obase, bd);
         const unsigned grid = (unsigned)((cnt + BLOCK - 1) / BLOCK);
-        if (fns.search) (g_cont.empty() ? fns.search : fns.search_c)<<<grid, BLOCK>>>(bd, obase, (u32)cnt);
-        else if (g_cont.empty()) search_kernel<false><<<grid, BLOCK>>>(bd, obase, (u32)cnt);
-        else search_kernel<true><<<grid, BLOCK>>>(bd, obase, (u32)cnt);
+        if (fns.search[0]) fns.search[kv]<<<grid, BLOCK>>>(bd, obase, (u32)cnt);
+        else if (kv == 0) search_kernel<false, false><<<grid, BLOCK>>>(bd, obase, (u32)cnt);
+        else if (kv == 1) search_kernel<true, false><<<grid, BLOCK>>>(bd, obase, (u32)cnt);
+        else if (kv == 2) search_kernel<false, true><<<grid, BLOCK>>>(bd, obase, (u32)cnt);
+        else search_kernel<true, true><<<grid, BLOCK>>>(bd, obase, (u32)cnt);
         CK(cudaGetLastError());
         CK(cudaDeviceSynchronize());
         tried += cnt * RF;

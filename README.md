@@ -21,6 +21,7 @@ Build the finders once (`powershell -File build.ps1`, `-NoGpu` to skip CUDA), th
 py skinhash.py mojang skins/me.png -p c0ffee        # Mojang link starting with c0ffee
 py skinhash.py namemc skins/me.png -p beef          # NameMC page starting with beef
 py skinhash.py both   skins/me.png --namemc-prefix beef --mojang-prefix cafe
+py skinhash.py mojang skins/me.png -m '^0{12}' -m '^????0{12}'   # patterns, see "Patterns" below
 py skinhash.py ids    skins/me.png                  # both ids and links of a skin
 py skinhash.py mojang jeb_ -p c0ffee                # a username or UUID works as the skin too
 py skinhash.py verify skins/me.png found/me/<id>.png
@@ -74,6 +75,7 @@ Options shared by the search commands (`mojang`, `namemc`, `both`):
 | `-p, --prefix HEX` | id starts with HEX. Repeatable. |
 | `-s, --suffix HEX` | id ends with HEX. Repeatable. |
 | `-c, --contains HEX` | HEX occurs anywhere in the id (1-16 hex digits, may start with 0). Repeatable. |
+| `-m, --match PATTERN` | hex pattern (see "Patterns"). Repeatable; also a comma list or `@FILE`. |
 | `-z, --zeros N` | at least N leading zero digits. Repeatable. |
 | `-n, --count N` | stop after N verified hits (default 1) |
 | `--every-target` | run until every target has a hit; the first hit per target is kept, `-n` is ignored |
@@ -91,6 +93,61 @@ that lies partly or fully in the dropped zeros does not count (`-c 0a` does not 
 that starts `00a1b2...`); for NameMC the fixed 16 digits. The hit is reported as `contains:HEX`. Each extra
 `--contains` pattern costs GPU speed, about 13% for the first on Mojang and 3% on NameMC (see
 `docs/optimizations.md`).
+### Patterns
+
+`-m/--match` searches for many things at once. A hit matches any of the patterns (and any other target).
+
+| Syntax | Meaning |
+|---|---|
+| `c0ffee` | hex digits (case-insensitive), anywhere in the id |
+| `^` / `$` | anchor to the start / end; only as the first / last character |
+| `?` | any hex digit |
+| `?d` / `?l` | a digit 0-9 / a letter a-f |
+| `[0-3]` `[a-f]` `[05af]` `[0-37a]` | a class: ranges and lists |
+| `{n}` | repeat the previous digit, `?`, `?d`, `?l` or class n times (n >= 1) |
+| `*` | a gap of any length between two pieces: `^cafe*babe$` |
+
+- Mojang: the pattern is matched on the full 64-digit SHA-256. `^` is its start, so `^0{12}` means 12 leading zeros
+  and `^????0{12}` means 12 zeros after the first 4 digits. A pattern without `^` must lie in the link id (leading zeros
+  dropped), the same rule as `--contains`. `-p` keeps its meaning (the link id starts with HEX, after any zeros).
+- NameMC: the 16-digit id as shown, leading zeros included.
+- `?d` is always the digit class. For "any digit, then d" write `?{4}dead` or `?[d]`, not `????dead` (that is
+  `???`, `?d`, `ead`).
+- Patterns are checked strictly: a bad character, `{0}`, an unbalanced `[` or `{`, `^`/`$` in the middle, `*` at
+  either end (it does nothing), a pattern longer than the id, or `^...$` without `*` that is not exactly the id
+  length are errors with the position.
+
+Three ways to give them, mixed freely:
+
+```
+py skinhash.py mojang skins/me.png -m '^0{12}' -m '^????0{12}'      # repeat -m
+py skinhash.py mojang skins/me.png -m '^c0ffee,dead$'                # comma list
+py skinhash.py mojang skins/me.png -m @patterns.txt                  # file, path relative to the current directory
+py skinhash.py both skins/me.png --namemc-match '^0{6}' --mojang-match @mojang.txt
+```
+
+A pattern file has one pattern per line (comma lists work too); `#` starts a comment, blank lines are ignored.
+Errors name the file and line.
+
+Quoting: in PowerShell and bash use single quotes, because `$` starts a variable inside double quotes
+(`-m 'dead$'`). In cmd.exe `^` is the escape character: use double quotes (`-m "^0{12}"`).
+
+At the start each target is printed with its odds and expected time at the engine's usual rate, e.g.
+`target match:^0{12}: ~1 in 2.8e14, ~16.3 h at ~4.80 G/s (typical gpu rate)`, and once the finder reports its rate, the expected times at
+the measured rate. A warning is printed when a pattern is very common (better than ~1 in 1e7) or when the part the
+GPU can test is (classes like `?d` or `[05af]` give the GPU no bits to compare; see below): the host re-check of
+every candidate would then be the bottleneck. `--every-target` runs until every pattern has a hit; `-n` counts hits
+over all targets.
+
+How it runs: each pattern compiles to nibble masks. The GPU compares `(hash word & mask) == value` for an anchored
+mask over the `^` and `$` pieces, or slides one window of up to 16 digits of an unanchored piece over the id, whichever
+is more selective. A class becomes the bits all its digits share (`[0-7]` is exact, `?l` only fixes the top bit,
+`?d` fixes nothing). Every candidate that passes is re-checked against the full pattern on the CPU, and then by
+`skinhash.py` as for every hit. The hit is reported as `match:PATTERN`. Cost on the GPU (Mojang, RTX 5060 Ti):
+about 1% per anchored pattern and about 12% per unanchored pattern (the cost of a `--contains` pattern); NameMC
+about 2-3% each; details in `docs/optimizations.md`. Limits:
+64 patterns per group, at most 32 of them unanchored (together with `--contains`).
+
 Every hit is re-verified by `skinhash.py` (hash equals file name, Python zlib re-encodes the file identically,
 no visible pixel changed) and printed as `HIT <why> sha=<full hex> id=<id> counter=<n> file=<path>`.
 Ctrl+C stops everything and never starts a fallback. Unknown options are an error; nothing is passed on to the
@@ -151,13 +208,14 @@ Output goes to `found/<skin>_collide/`.
 py skinhash.py both skins/me.png --namemc-prefix beef --mojang-prefix cafe
 py skinhash.py both skins/me.png --namemc-zeros 6 --mojang-zeros 9 --every-target
 py skinhash.py both skins/me.png --namemc-contains bee --mojang-contains cafe
+py skinhash.py both skins/me.png --namemc-match '^0{6}' --mojang-match 'cafe*babe$'
 py skinhash.py both skins/me.png --mojang-prefix c0ffee        # only one group: only that phase
 ```
 
 | Option | Meaning |
 |---|---|
-| `--namemc-prefix/-suffix/-contains/-zeros` | NameMC targets (phase 1), same rules as `namemc` |
-| `--mojang-prefix/-suffix/-contains/-zeros` | Mojang targets (phase 2), same rules as `mojang` |
+| `--namemc-prefix/-suffix/-contains/-match/-zeros` | NameMC targets (phase 1), same rules as `namemc` |
+| `--mojang-prefix/-suffix/-contains/-match/-zeros` | Mojang targets (phase 2), same rules as `mojang` |
 | `-n`, `--every-target`, `--engine`, `--no-generic`, `--unused-only`, `--tail-pixels`, `--no-watermark`, `-o`, `--threads`, `--seed` | as above; `-n` applies to phase 2 |
 
 Phase 1 runs a NameMC search up to its first verified hit (with `--every-target`, across the NameMC targets, and
@@ -299,7 +357,7 @@ py skinhash.py bench --engine gpu                    # 10 s benchmark, saves not
 
 # manual:
 fastfinder.exe found/me/base.raw 6 found/me --dump-job job.bin --auto -p dead
-gpufinder.exe job.bin found/me [-p HEX] [-s HEX] [-z N] [-S SEED] [-n N] [-b] [--generic]
+gpufinder.exe job.bin found/me [-p HEX] [-s HEX] [-c HEX] [-m PATTERN] [-z N] [-S SEED] [-n N] [-b] [--generic]
 ```
 
 gpufinder takes -p/-s/-z/-n/-S/-b like the other finders. Patterns given to it replace those in the job.

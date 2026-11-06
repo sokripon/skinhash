@@ -8,6 +8,7 @@
 #include <pthread.h>
 #include <stdatomic.h>
 #include <zlib.h>
+#include "pattern.h"
 #ifdef _WIN32
 #include <windows.h>
 #else
@@ -202,6 +203,18 @@ static const char *contains_find(const uint8_t *dg, int nbytes, int first) {
             if (!memcmp(nib + o, p->d, (size_t)p->n)) return p->text;
     }
     return NULL;
+}
+
+/* "Match" patterns (-m, pattern.h): reported as match:<text>. The width is 64 (Mojang) or 16 (NameMC). */
+static mpat_t mpats[MAX_PAT];
+static int nmpats = 0;
+
+static int parse_match(const char *text, int width) {
+    char err[256];
+    if (nmpats >= MAX_PAT) { fprintf(stderr, "too many -m patterns (max %d)\n", MAX_PAT); return -1; }
+    if (mpat_parse(text, width, &mpats[nmpats], err, sizeof err)) { fprintf(stderr, "%s\n", err); return -1; }
+    nmpats++;
+    return 0;
 }
 
 /* Leading zero nibbles of a 32-byte digest, at most 63: the trimmed id of an all-zero hash is "0". */

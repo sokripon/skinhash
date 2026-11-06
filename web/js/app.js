@@ -3,7 +3,9 @@ import { decodePng, mojangPng, W, H } from "./png.js";
 import { sha256, toHex } from "./hash.js";
 import { prepareSkin, autoChoose, rebuildJob, selfTest, makeTestVectors, makeRng, MAX_K } from "./job.js";
 import { initDevice, webgpuAvailable, prepareGpuJob } from "./gpu.js";
-import { parseHexList, targetList, targetKey, gpuTargets, gpuNmTargets, expectedTries, MAXCONT } from "./targets.js";
+import { parseHexList, targetList, targetKey, gpuTargets, gpuNmTargets, expectedTries, MAXCONT, MAXANCH, anchoredTargets, needsSliding, patternOf } from "./targets.js";
+import { parsePatternText, fmtOdds, WARN_ODDS } from "./patterns.js";
+import { MAXPAT } from "./wgsl.js";
 import { verifyHit, verifyNmHit, verifyBoth } from "./verify.js";
 import { prepareNameMc, makeNmTests, namemcIdHex } from "./namemc.js";
 import { NmGpuJob } from "./nmgpu.js";
@@ -156,14 +158,49 @@ document.querySelectorAll("input[name=mode]").forEach((el) => el.addEventListene
 function readTargets() { return readGroup(S.mode === "namemc", NM_IDS); }
 function readGroup(nm, ids) {
   const p = parseHexList($(ids[0]).value, "prefix", nm), s = parseHexList($(ids[1]).value, "suffix"), c = parseHexList($(ids[2]).value, "contains");
-  const errors = [...p.errors, ...s.errors, ...c.errors];
+  const pt = parsePatternText($(ids[4]).value, nm ? 16 : 64);
+  const errors = [...p.errors, ...s.errors, ...c.errors, ...pt.errors];
   const zeros = Math.max(0, Math.min(15, parseInt($(ids[3]).value || "0", 10) || 0));
-  const targets = targetList({ prefixes: p.list, suffixes: s.list, contains: c.list, zeros });
-  if (targets.length > 32) errors.push("At most 32 targets.");
-  if (c.list.length > MAXCONT) errors.push(`At most ${MAXCONT} contains patterns.`);
-  return { targets, errors };
+  const targets = targetList({ prefixes: p.list, suffixes: s.list, contains: c.list, patterns: pt.patterns, zeros });
+  const width = nm ? 16 : 64;
+  const nslide = c.list.length + pt.patterns.filter((x) => x.prefilter().kind === "sliding").length;
+  const nanch = pt.patterns.filter((x) => x.prefilter().kind === "anchored").length;
+  if (nslide > MAXCONT) errors.push(`At most ${MAXCONT} contains patterns and unanchored patterns together.`);
+  if (nm && nanch + p.list.length + s.list.length > MAXPAT) errors.push(`At most ${MAXPAT} prefixes, suffixes and anchored patterns together.`);
+  if (!nm && (nanch > MAXANCH || p.list.length + s.list.length > MAXPAT)) errors.push(`At most ${MAXANCH} anchored patterns and ${MAXPAT} prefixes and suffixes.`);
+  renderPatInfo(ids[5], pt, width);
+  return { targets, errors, width };
 }
-const NM_IDS = ["prefixes", "suffixes", "contains", "zeros"], MJ_IDS = ["mprefixes", "msuffixes", "mcontains", "mzeros"];
+const NM_IDS = ["prefixes", "suffixes", "contains", "zeros", "patterns", "patinfo"], MJ_IDS = ["mprefixes", "msuffixes", "mcontains", "mzeros", "mpatterns", "mpatinfo"];
+/** Per-line odds and expected time (or the error) under a Patterns box. */
+function renderPatInfo(id, pt, width) {
+  const ul = $(id);
+  ul.textContent = "";
+  const rate = width === 16 ? (S.rates.namemc || 2e9) : (S.rates.mojang || 2.5e9);
+  const assumed = width === 16 ? !S.rates.namemc : !S.rates.mojang;
+  for (const l of pt.lines) {
+    const li = document.createElement("li");
+    if (l.error) { li.className = "bad"; li.textContent = l.error; ul.appendChild(li); continue; }
+    const p = l.pattern.probability(), f = l.pattern.prefilter();
+    const code = document.createElement("code"); code.textContent = l.pattern.text;
+    li.appendChild(code);
+    let txt = ` ${fmtOdds(p)}, ${p <= 0 ? "never" : 1 / p / rate < 0.1 ? "< 0.1 s" : "~" + fmtTime(1 / p / rate)} at ${fmt(rate)}/s${assumed ? " (assumed)" : ""}`;
+    if (p > WARN_ODDS) { li.className = "warn"; txt += ". Very common: hits will come faster than they can be checked."; }
+    else if (f.pass > WARN_ODDS) { li.className = "warn"; txt += `. The GPU can only test part of it (passes ~1 in ${(1 / f.pass).toExponential(1).replace("e+", "e")}); add literal digits.`; }
+    li.appendChild(document.createTextNode(txt));
+    ul.appendChild(li);
+  }
+}
+for (const [box, file, btn] of [["patterns", "patfile", "patload"], ["mpatterns", "mpatfile", "mpatload"]]) {
+  $(btn).addEventListener("click", () => $(file).click());
+  $(file).addEventListener("change", async (e) => {
+    const f = e.target.files[0];
+    if (!f) return;
+    $(box).value = (await f.text()).replace(/\r\n/g, "\n").trimEnd();
+    e.target.value = "";
+    $(box).dispatchEvent(new Event("input"));
+  });
+}
 const firstHitTries = (targets, nm) => targets.length ? 1 / targets.reduce((a, t) => a + 1 / expectedTries(t, nm), 0) : 0;
 function updateExpect() {
   if (S.mode === "both") {
@@ -181,7 +218,7 @@ function updateExpect() {
   const { targets, errors } = readTargets();
   showErr("targeterr", errors.join(" "));
   $("expect").textContent = targets.length && !errors.length
-    ? "Expected tries: " + targets.map((t) => `${t.kind} ${t.text} ~${fmt(expectedTries(t, S.mode === "namemc"))}`).join(", ") + (S.lastRate ? ` (about ${targets.map((t) => fmtTime(expectedTries(t, S.mode === "namemc") / S.lastRate)).join(", ")} at your speed)` : "")
+    ? "Expected tries: " + targets.map((t) => `${t.kind === "match" ? "pattern" : t.kind} ${t.text} ~${fmt(expectedTries(t, S.mode === "namemc"))}`).join(", ") + (S.lastRate ? ` (about ${targets.map((t) => fmtTime(expectedTries(t, S.mode === "namemc") / S.lastRate)).join(", ")} at your speed)` : "")
     : "";
 }
 [...NM_IDS, ...MJ_IDS].forEach((id) => $(id).addEventListener("input", updateExpect));
@@ -263,7 +300,7 @@ async function runMojang(bench, opts) {
     const r = readTargets();
     showErr("targeterr", r.errors.join(" "));
     if (r.errors.length) return;
-    if (!r.targets.length) { showErr("targeterr", "Enter a prefix, a suffix, a contains pattern or minimum leading zeros."); return; }
+    if (!r.targets.length) { showErr("targeterr", "Enter a prefix, a suffix, a contains pattern, a pattern or minimum leading zeros."); return; }
     targets = r.targets;
   }
   showErr("runerr", "");
@@ -292,7 +329,7 @@ async function runMojang(bench, opts) {
         if (!fresh.length) { dropped++; continue; }
         fresh.forEach((t) => remaining.delete(targetKey(t)));
         emit(r, fresh);
-        if (g) { const gt = gpuTargets(wantNow()); g.setTargets(gt.pats, gt.zeros, gt.cont); }
+        if (g) { const gt = gpuTargets(wantNow()); g.setTargets(gt.pats, gt.zeros, gt.cont, gt.anchKeys); }
       } else emit(r, r.whys);
       hitCount++; finishCheck();
     }
@@ -316,12 +353,12 @@ async function runMojang(bench, opts) {
       const nSelf = selfTest(job, rng, 250);
       makeTestVectors(job, rng, 24, 104);   // 24 against full pako, 104 more from the byte-level builder
       setStatus("Compiling GPU kernel and checking it against the CPU...");
-      const prepared = await prepareGpuJob(device, job, { wg: Number(new URLSearchParams(location.search).get("wg")) || 256, contains: targets.some((t) => t.kind === "contains") });
+      const prepared = await prepareGpuJob(device, job, { wg: Number(new URLSearchParams(location.search).get("wg")) || 256, contains: needsSliding(targets, 64), anchored: anchoredTargets(targets) });
       g = prepared.g;
       const gate = prepared.gate;
       S.gate = { ...gate, selfTest: nSelf };
       if (!gate.ok) throw new Error(`GPU check failed: ${gate.bad} of ${gate.n} test vectors differ from the CPU (${gate.detail}). Search not started.`);
-      const gt = gpuTargets(wantNow()); g.setTargets(gt.pats, gt.zeros, gt.cont);
+      const gt = gpuTargets(wantNow()); g.setTargets(gt.pats, gt.zeros, gt.cont, gt.anchKeys);
       if (bench && sets === 1) setTimeout(() => (S.stop = true), 10000);
       setStatus(`${bench ? "Benchmark" : "Searching"}. GPU matches CPU on ${gate.n}/${gate.n} test vectors. ${job.K} search pixels, ${job.nblk} SHA block${job.nblk > 1 ? "s" : ""}, ${gate.kernel} kernel.`, "ok");
       const base = totalTried, tRun = performance.now(); runT0 = tRun;
@@ -381,7 +418,7 @@ async function runNameMc(bench, opts) {
     const r = readTargets();
     showErr("targeterr", r.errors.join(" "));
     if (r.errors.length) return;
-    if (!r.targets.length) { showErr("targeterr", "Enter a prefix, a suffix, a contains pattern or minimum leading zeros."); return; }
+    if (!r.targets.length) { showErr("targeterr", "Enter a prefix, a suffix, a contains pattern, a pattern or minimum leading zeros."); return; }
     targets = r.targets;
   }
   showErr("runerr", "");
@@ -425,7 +462,7 @@ async function runNameMc(bench, opts) {
     await new Promise((r) => setTimeout(r, 10));
     const tests = makeNmTests(prep, rng, 96);
     setStatus("Compiling GPU kernel and checking it against the CPU...");
-    g = new NmGpuJob(device, prep, tests, { wg: Number(new URLSearchParams(location.search).get("wg")) || 256, contains: targets.some((t) => t.kind === "contains") });
+    g = new NmGpuJob(device, prep, tests, { wg: Number(new URLSearchParams(location.search).get("wg")) || 256, contains: needsSliding(targets, 16) });
     await g.build();
     const gate = await g.gate();
     S.gate = { ...gate, selfTest: tests.length };

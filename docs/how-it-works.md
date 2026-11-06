@@ -161,6 +161,33 @@ compare the digest at every nibble offset, so a pattern of n digits needs about 
 Mojang, 3% on NameMC, more for each further pattern (see [optimizations.md](optimizations.md)). Without a contains
 target the kernels are built without the check.
 
+### Patterns
+
+A pattern (`-m '^0{12}'`, `-m '^cafe*babe$'`, the Patterns box on the web page) describes many ids at once: hex digits,
+`^`/`$` anchors, `?` (any digit), `?d` (0-9), `?l` (a-f), classes like `[0-3]`, `{n}` repeats and `*` gaps. For
+Mojang it is matched on the full 64-digit hash, so `^0{12}` is 12 leading zeros; a pattern without `^` has to lie in
+the link id. Several patterns are alternatives.
+
+The GPU never runs the pattern itself. Each pattern is compiled into one cheap prefilter, and only candidates that
+pass it go to the CPU, which checks the whole pattern:
+
+1. Every token becomes a 4-bit mask and value: the bits that all allowed digits share. A literal fixes all 4 bits,
+   `[0-7]` fixes the top bit to 0 (exact, because the range is aligned), `?l` (a-f, 1010-1111) only fixes the top
+   bit to 1, `?d` and `?` fix nothing.
+2. Anchored pieces (`^...`, `...$`) have fixed positions, so they become one mask/value over the hash words. A
+   candidate passes if `(word & mask) == value` for every word; words without a mask are not compared. `^cafe*babe$`
+   is one mask over words 0 and 7.
+3. An unanchored piece becomes a window of up to 8 + 8 tokens (its most selective part). The GPU compares the window
+   at every digit offset in the allowed range, the same code as `--contains`: one funnel shift, one masked compare
+   per offset, the second 8 digits and the range only when the first 8 matched.
+4. Each pattern uses the more selective of the two (the chance to pass is 2^-bits for a mask, offsets × 2^-bits for a
+   window). The rest of the pattern, the gaps and the exact classes are checked on the CPU.
+
+Unaligned classes therefore let some non-matches through, never the other way round: a true match always passes
+its prefilter (tested on random hashes against a regex reference). When a pattern is common, or its prefilter has
+few bits (`?d{20}`), many candidates reach the CPU and the search slows down; the tool warns about this and prints
+the odds and expected time of every target.
+
 Example result, made from `skins/steve.png` in the web page's Both mode and uploaded:
 
 - Mojang: `textures.minecraft.net/texture/7848d1fb944bf2b37a597632fc8e1abbd495a440e3f699b9124165`

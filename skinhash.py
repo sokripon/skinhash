@@ -26,6 +26,8 @@ import zlib
 
 from PIL import Image
 
+import patterns as pt
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 W = H = 64
 ROW = 1 + W * 4
@@ -247,6 +249,13 @@ def run_finder(cmd, rgba, on_hit=None, verifier=None):
     try:
         for line in proc.stdout:
             print(pretty_progress(line), end="", flush=True)
+            if ODDS and not ODDS.get("shown"):
+                m = PROGRESS_RE.match(line)
+                if m and int(m.group(3)) > 0:
+                    ODDS["shown"] = True
+                    rate = int(m.group(3))
+                    print(f"expected time at the measured {pt.fmt_rate(rate)}: " + "; ".join(
+                        f"{t} {pt.fmt_eta(p, rate)}" for t, p in ODDS["targets"]), flush=True)
             if line.startswith("RATE "):
                 try:
                     LAST_RATE = float(line.split()[1])
@@ -281,7 +290,7 @@ def target_args(targets):
     out = []
     for t in targets:
         kind, val = t.split(":", 1)
-        out += [{"prefix": "-p", "suffix": "-s", "zeros": "-z", "contains": "-c"}[kind], val]
+        out += [{"prefix": "-p", "suffix": "-s", "zeros": "-z", "contains": "-c", "match": "-m"}[kind], val]
     return out
 
 
@@ -557,7 +566,47 @@ def target_match(t, shown, full):
         return shown.endswith(val)
     if kind == "contains":
         return val in shown
+    if kind == "match":
+        return parsed_pattern(val, len(full)).match(full)
     return len(full) - len(full.lstrip("0")) >= int(val)
+
+
+_PATTERNS = {}
+
+
+def parsed_pattern(text, width):
+    """A -m pattern, parsed once. width: 64 (Mojang, matched on the full hash) or 16 (NameMC)."""
+    if (text, width) not in _PATTERNS:
+        _PATTERNS[(text, width)] = pt.parse_line(text, width)
+    return _PATTERNS[(text, width)]
+
+
+ODDS = None   # {"targets": [(target, probability)], "shown": bool} of the running search
+NOMINAL = {("mojang", "gpu"): 4.8e9, ("mojang", "cpu"): 4.8e7, ("mojang", "generic"): 1.6e5,
+           ("namemc", "gpu"): 3.1e9, ("namemc", "cpu"): 1.35e8, ("namemc", "gpu-unused"): 1.48e8,
+           ("namemc", "cpu-unused"): 6.8e6}
+
+
+def report_odds(targets, width, rate, label):
+    """Odds and expected time per target, warnings for targets the host re-check could not keep up with."""
+    global ODDS
+    ODDS = None
+    if not targets:
+        return
+    rows = []
+    for t in targets:
+        p = pt.target_probability(t, width)
+        rows.append((t, p))
+        warn = ""
+        if t.startswith("match:"):
+            f = parsed_pattern(t[6:], width).prefilter()
+            if p > pt.WARN_ODDS:
+                warn = "  warning: very common; hits may come faster than they can be re-checked and saved"
+            elif f["pass"] > pt.WARN_ODDS:
+                warn = (f"  warning: the GPU prefilter passes ~1 in {1 / f['pass']:.1e}; the host re-check of those "
+                        f"candidates will slow the search (add literal digits)")
+        print(f"target {t}: {pt.fmt_odds(p)}, {pt.fmt_eta(p, rate)} at {label}{warn}", flush=True)
+    ODDS = {"targets": rows, "shown": False}
 
 
 def first_match(targets, shown, full):
@@ -661,6 +710,9 @@ def mojang_search(path, targets, count=1, every=False, engine="auto", no_generic
         mode, why = "cpu", "gpufinder not built, last pixels invisible"
     label = {"gpu": "gpu (gpufinder)", "cpu": f"cpu fast mode (last {k} pixels)", "generic": "generic (hashfinder)"}[mode]
     print(f"engine: {label} - {why}", flush=True)
+    if not bench:
+        rate = NOMINAL[("mojang", mode)]
+        report_odds(targets, 64, rate, f"~{pt.fmt_rate(rate)} (typical {mode} rate)")
 
     def launch(fargs, on_hit=None):
         if mode in ("gpu", "cpu"):
@@ -729,6 +781,10 @@ def namemc_search(path, targets, count=1, every=False, engine="auto", unused_onl
     else:
         use_gpu, why = False, "namemcgpu not built"
     print(f"engine: {'gpu (namemcgpu)' if use_gpu else 'cpu (namemcfinder)'} - {why}", flush=True)
+    if not bench:
+        key = ("gpu" if use_gpu else "cpu") + ("-unused" if unused_only else "")
+        rate = NOMINAL[("namemc", key)]
+        report_odds(targets, 16, rate, f"~{pt.fmt_rate(rate)} (typical {key} rate)")
 
     def launch(fargs, on_hit=None):
         global GPU_FAILED
@@ -1228,13 +1284,37 @@ def cmd_bench(args):
     return 0
 
 
-def targets_from(prefix, suffix, zeros, contains=None):
-    return ([f"prefix:{p}" for p in prefix or []] + [f"suffix:{s}" for s in suffix or []]
-            + [f"zeros:{z}" for z in zeros or []] + [f"contains:{c}" for c in contains or []])
+def targets_from(prefix, suffix, zeros, contains=None, match=None, width=64, parser=None, flag="-m"):
+    """Target strings of one group. -m values (patterns, comma lists, @file) are parsed here; errors stop the
+    command with every message."""
+    t = ([f"prefix:{p}" for p in prefix or []] + [f"suffix:{s}" for s in suffix or []]
+         + [f"zeros:{z}" for z in zeros or []] + [f"contains:{c}" for c in contains or []])
+    if match:
+        try:
+            pats = pt.parse_inputs(match, width)
+        except pt.PatternError as e:
+            msg = f"{flag}: " + str(e).replace("\n", f"\n{flag}: ")
+            if parser:
+                parser.error(msg)
+            raise
+        t += [f"match:{p.text}" for p in pats]
+        # the GPU tables: sliding windows share the contains table, anchored masks (NameMC: with -p/-s)
+        nslide = len(contains or []) + sum(p.prefilter()["kind"] == "sliding" for p in pats)
+        nanch = sum(p.prefilter()["kind"] == "anchored" for p in pats) + (len(prefix or []) + len(suffix or []) if width == 16 else 0)
+        err = None
+        if nslide > pt.MAX_SLIDING:
+            err = f"{nslide} unanchored patterns (with --contains); the GPU takes at most {pt.MAX_SLIDING}"
+        elif nanch > pt.MAX_PATTERNS:
+            err = f"{nanch} anchored patterns; the GPU takes at most {pt.MAX_PATTERNS}"
+        if err:
+            if parser:
+                parser.error(f"{flag}: {err}")
+            raise pt.PatternError(err)
+    return t
 
 
 def check_search_options(parser, args, has_target,
-                         hint="use -p/--prefix, -s/--suffix, -c/--contains or -z/--zeros"):
+                         hint="use -p/--prefix, -s/--suffix, -c/--contains, -m/--match or -z/--zeros"):
     if not has_target:
         parser.error("no target given: " + hint)
     if getattr(args, "no_generic", False) and args.engine == "generic":
@@ -1251,7 +1331,7 @@ def default_out(args, suffix=""):
 
 
 def cmd_mojang(args):
-    targets = targets_from(args.prefix, args.suffix, args.zeros, args.contains)
+    targets = targets_from(args.prefix, args.suffix, args.zeros, args.contains, args.match, 64, args.parser)
     check_search_options(args.parser, args, bool(targets))
     args.skin = skin_path(args.skin)
     mojang_search(args.skin, targets, args.count, args.every_target, args.engine, args.no_generic,
@@ -1261,7 +1341,7 @@ def cmd_mojang(args):
 
 
 def cmd_namemc(args):
-    targets = targets_from(args.prefix, args.suffix, args.zeros, args.contains)
+    targets = targets_from(args.prefix, args.suffix, args.zeros, args.contains, args.match, 16, args.parser)
     check_search_options(args.parser, args, bool(targets))
     args.skin = skin_path(args.skin)
     namemc_search(args.skin, targets, args.count, args.every_target, args.engine, args.unused_only,
@@ -1277,10 +1357,12 @@ def cmd_collide(args):
 
 
 def cmd_both(args):
-    nm_t = targets_from(args.namemc_prefix, args.namemc_suffix, args.namemc_zeros, args.namemc_contains)
-    mj_t = targets_from(args.mojang_prefix, args.mojang_suffix, args.mojang_zeros, args.mojang_contains)
+    nm_t = targets_from(args.namemc_prefix, args.namemc_suffix, args.namemc_zeros, args.namemc_contains,
+                        args.namemc_match, 16, args.parser, "--namemc-match")
+    mj_t = targets_from(args.mojang_prefix, args.mojang_suffix, args.mojang_zeros, args.mojang_contains,
+                        args.mojang_match, 64, args.parser, "--mojang-match")
     check_search_options(args.parser, args, bool(nm_t or mj_t),
-                         "use --namemc-prefix/-suffix/-contains/-zeros and/or --mojang-prefix/-suffix/-contains/-zeros")
+                         "use --namemc-prefix/-suffix/-contains/-match/-zeros and/or --mojang-prefix/-suffix/-contains/-match/-zeros")
     args.skin = skin_path(args.skin)
     outdir = default_out(args, "_both")
     orig = load_rgba(args.skin)
@@ -1417,6 +1499,11 @@ def add_targets(p, kind):
                    help=("HEX occurs anywhere in the link id (leading zeros dropped; up to 16 digits, may start with 0). Repeatable."
                          if kind == "mojang" else
                          "HEX occurs anywhere in the 16-digit id (up to 16 digits, may start with 0). Repeatable."))
+    g.add_argument("-m", "--match", metavar="PATTERN", action="append",
+                   help=("hex pattern: ^ start, $ end, ? any, ?d 0-9, ?l a-f, [0-3] class, {n} repeat, * gap. "
+                         + ("^ is the start of the full 64-digit hash (^0{12} = 12 leading zeros); without ^ the "
+                            "pattern must lie in the link id. " if kind == "mojang" else "Matched on the 16-digit id. ")
+                         + "Repeatable; also a comma list (-m '^cafe,dead$') or @FILE (one pattern per line, # comments)."))
 
 
 def add_stopping(p, both=False):
@@ -1500,6 +1587,8 @@ def build_parser():
                 "  py skinhash.py mojang skins/steve.png -z 9 -n 3 -o out/steve\n"
                 "  py skinhash.py mojang skins/steve.png -s dead --engine cpu --no-generic\n"
                 "  py skinhash.py mojang skins/steve.png -c beef -n 3     (beef anywhere in the link id)\n"
+                "  py skinhash.py mojang skins/steve.png -m '^0{12}' -m '^????0{12}'   (12 zeros at the start or after 4 digits)\n"
+                "  py skinhash.py mojang skins/steve.png -m '^cafe*babe$' -m @patterns.txt\n"
                 "  py skinhash.py mojang jeb_ -p c0ffee            (username; also a UUID or texture id)")
     add_skin(p)
     add_targets(p, "mojang")
@@ -1515,6 +1604,7 @@ def build_parser():
                 "  py skinhash.py namemc skins/steve.png -p beef\n"
                 "  py skinhash.py namemc skins/steve.png -z 6 -n 3\n"
                 "  py skinhash.py namemc skins/steve.png -p dead -s cafe --every-target --engine cpu\n"
+                "  py skinhash.py namemc skins/steve.png -m '^beef,beef$' --every-target\n"
                 "  py skinhash.py namemc jeb_ -p beef")
     add_skin(p)
     add_targets(p, "namemc")
@@ -1530,6 +1620,7 @@ def build_parser():
                 "  py skinhash.py both skins/steve.png --namemc-prefix beef --mojang-prefix cafe\n"
                 "  py skinhash.py both skins/steve.png --namemc-zeros 6 --mojang-zeros 9\n"
                 "  py skinhash.py both skins/steve.png --namemc-contains bee --mojang-contains cafe\n"
+                "  py skinhash.py both skins/steve.png --namemc-match '^0{6}' --mojang-match 'cafe*babe$'\n"
                 "  py skinhash.py both skins/steve.png --mojang-prefix c0ffee     (only the Mojang phase)\n"
                 "  py skinhash.py both jeb_ --namemc-prefix beef --mojang-prefix cafe")
     add_skin(p)
@@ -1538,11 +1629,13 @@ def build_parser():
     g.add_argument("--namemc-suffix", metavar="HEX", type=hex_arg, action="append", help="NameMC id ends with HEX. Repeatable.")
     g.add_argument("--namemc-contains", metavar="HEX", type=hex_arg, action="append", help="HEX occurs anywhere in the 16-digit NameMC id. Repeatable.")
     g.add_argument("--namemc-zeros", metavar="N", type=int_range(1, 16), action="append", help="at least N leading zero digits. Repeatable.")
+    g.add_argument("--namemc-match", metavar="PATTERN", action="append", help="hex pattern on the 16-digit NameMC id, as -m of the namemc command (also comma lists and @FILE). Repeatable.")
     g = p.add_argument_group("Mojang targets (phase 2; run on the phase 1 hit)")
     g.add_argument("--mojang-prefix", metavar="HEX", type=mojang_hex, action="append", help="link id starts with HEX (may not start with 0: use --mojang-zeros). Repeatable.")
     g.add_argument("--mojang-suffix", metavar="HEX", type=hex_arg, action="append", help="link id ends with HEX. Repeatable.")
     g.add_argument("--mojang-contains", metavar="HEX", type=hex_arg, action="append", help="HEX occurs anywhere in the link id (leading zeros dropped). Repeatable.")
     g.add_argument("--mojang-zeros", metavar="N", type=int_range(1, 64), action="append", help="at least N leading zero digits. Repeatable.")
+    g.add_argument("--mojang-match", metavar="PATTERN", action="append", help="hex pattern on the Mojang hash, as -m of the mojang command (also comma lists and @FILE). Repeatable.")
     add_stopping(p, both=True)
     add_engine(p, "both")
     add_pixels(p, "both")

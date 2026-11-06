@@ -55,6 +55,18 @@
       <label>Contains (hex)<input id="contains" type="text" placeholder="beef" autocomplete="off" spellcheck="false"></label>
       <label><span id="zeroslabel">Minimum leading zeros</span><input id="zeros" type="number" min="0" max="15" value="0"></label>
     </div>
+    <div class="patbox">
+      <div class="pathead"><label for="patterns">Patterns (one per line)</label><button type="button" class="small" id="patload">Load file</button><input id="patfile" type="file" accept=".txt,text/plain" hidden></div>
+      <textarea id="patterns" rows="3" placeholder="^0{8}&#10;^cafe*babe$&#10;c0ffee" autocomplete="off" spellcheck="false"></textarea>
+      <ul class="patinfo" id="patinfo"></ul>
+    </div>
+    <details class="muted pathelp"><summary>Pattern syntax</summary>
+      <code>c0ffee</code> anywhere, <code>^</code> start, <code>$</code> end, <code>?</code> any digit, <code>?d</code> 0-9, <code>?l</code> a-f,
+      <code>[0-3]</code> <code>[05af]</code> classes, <code>{n}</code> repeat, <code>*</code> any gap (<code>^cafe*babe$</code>).
+      Mojang: <code>^</code> is the start of the full 64-digit hash, so <code>^0{12}</code> is 12 leading zeros; without <code>^</code> the
+      pattern must be in the link id (after the leading zeros). NameMC: the 16 digits. <code># comments</code> and comma lists work.
+      A hit matches any line.
+    </details>
     </fieldset>
     <fieldset class="grp" id="g2" hidden><legend>Phase 2: Mojang</legend>
     <div class="grid">
@@ -62,6 +74,11 @@
       <label>Suffixes (hex)<input id="msuffixes" type="text" autocomplete="off" spellcheck="false"></label>
       <label>Contains (hex)<input id="mcontains" type="text" autocomplete="off" spellcheck="false"></label>
       <label>Minimum leading zeros<input id="mzeros" type="number" min="0" max="15" value="0"></label>
+    </div>
+    <div class="patbox">
+      <div class="pathead"><label for="mpatterns">Patterns (one per line)</label><button type="button" class="small" id="mpatload">Load file</button><input id="mpatfile" type="file" accept=".txt,text/plain" hidden></div>
+      <textarea id="mpatterns" rows="3" placeholder="^0{8}&#10;^cafe*babe$&#10;c0ffee" autocomplete="off" spellcheck="false"></textarea>
+      <ul class="patinfo" id="mpatinfo"></ul>
     </div>
     </fieldset>
     <div class="row">

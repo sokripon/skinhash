@@ -10,7 +10,7 @@
  * A candidate emits those, then finishes SHA-256 from a midstate over the fixed whole
  * 64-byte blocks of the file.
  *
- * usage: fastfinder <raw.bin> <K> <outdir> [-p HEX]... [-s HEX]... [-c HEX]... [-z N] [-t N] [-S SEED] [-n N] [-b]
+ * usage: fastfinder <raw.bin> <K> <outdir> [-p HEX]... [-s HEX]... [-c HEX]... [-m PATTERN]... [-z N] [-t N] [-S SEED] [-n N] [-b]
  * exit code 4: a structural assumption failed; the caller falls back to hashfinder
  */
 #define _POSIX_C_SOURCE 200809L
@@ -656,7 +656,7 @@ static void *worker(void *arg) {
             uint64_t tp = trimmed_top64(hi, (uint64_t)s[2] << 32 | s[3]);
 
             const char *why = NULL;
-            char whybuf[48];
+            char whybuf[200];
             for (int i = 0; i < npats; i++) {
                 uint64_t v = pats[i].suffix ? lo : tp;
                 if ((v & pats[i].mask) == pats[i].val) {
@@ -670,6 +670,12 @@ static void *worker(void *arg) {
                 for (int i = 0; i < 8; i++) { dd[4*i] = s[i] >> 24; dd[4*i+1] = s[i] >> 16; dd[4*i+2] = s[i] >> 8; dd[4*i+3] = s[i]; }
                 const char *c = contains_find(dd, 32, digest_zero_nibbles(dd));
                 if (c) { snprintf(whybuf, sizeof whybuf, "contains:%s", c); why = whybuf; }
+            }
+            if (!why && nmpats) {
+                uint8_t dd[32];
+                for (int i = 0; i < 8; i++) { dd[4*i] = s[i] >> 24; dd[4*i+1] = s[i] >> 16; dd[4*i+2] = s[i] >> 8; dd[4*i+3] = s[i]; }
+                int k = mpat_find(mpats, nmpats, dd);
+                if (k >= 0) { snprintf(whybuf, sizeof whybuf, "match:%s", mpats[k].text); why = whybuf; }
             }
             int zn = hi ? __builtin_clzll(hi) / 4 : 16;
             if (zn > best) {
@@ -740,7 +746,7 @@ static uint64_t rand_seed(void) {
 
 int main(int argc, char **argv) {
     if (argc < 4) {
-        fprintf(stderr, "usage: fastfinder raw.bin K outdir [-p HEX]... [-s HEX]... [-c HEX]... [-z N] [-t N] [-S SEED] [-n N] [-b]\n");
+        fprintf(stderr, "usage: fastfinder raw.bin K outdir [-p HEX]... [-s HEX]... [-c HEX]... [-m PATTERN]... [-z N] [-t N] [-S SEED] [-n N] [-b]\n");
         return 1;
     }
     FILE *fp = fopen(argv[1], "rb");
@@ -759,6 +765,7 @@ int main(int argc, char **argv) {
         if (!strcmp(a, "-p") && v) { if (parse_pat(v, 0)) { fprintf(stderr, "bad -p %s\n", v); return 1; } i++; }
         else if (!strcmp(a, "-s") && v) { if (parse_pat(v, 1)) { fprintf(stderr, "bad -s %s\n", v); return 1; } i++; }
         else if (!strcmp(a, "-c") && v) { if (parse_contains(v)) { fprintf(stderr, "bad -c %s\n", v); return 1; } i++; }
+        else if (!strcmp(a, "-m") && v) { if (parse_match(v, 64)) return 1; i++; }
         else if (!strcmp(a, "-z") && v) { g_zeros = atoi(v); i++; }
         else if (!strcmp(a, "-t") && v) { g_threads = atoi(v); i++; }
         else if (!strcmp(a, "-S") && v) { g_seed = strtoull(v, NULL, 0); i++; }
@@ -789,8 +796,8 @@ int main(int argc, char **argv) {
     else setup_fast(&rng);
     self_test(&rng);
     if (g_dump) { dump_job(g_dump, &rng); return 0; }
-    fprintf(stderr, "threads=%d seed=%llu K=%d patterns=%d contains=%d zeros>=%d sha=%s\n", g_threads,
-            (unsigned long long)g_seed, g_K, npats, ncpats, g_zeros,
+    fprintf(stderr, "threads=%d seed=%llu K=%d patterns=%d contains=%d match=%d zeros>=%d sha=%s\n", g_threads,
+            (unsigned long long)g_seed, g_K, npats, ncpats, nmpats, g_zeros,
             sha256_block == sha256_block_generic ? "generic" : "sha-ni");
     fflush(stderr);
 

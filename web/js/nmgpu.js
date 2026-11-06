@@ -7,7 +7,7 @@
 import { K256 } from "./hash.js";
 import { MAXHITS, MAXPAT, MAXCONT, HITS_WORDS, containsCode } from "./wgsl.js";
 
-const NM_CB = 3 + 4 * MAXPAT;                 // contains table in PT: count, then p1 m1 p2 m2 lim per pattern
+const NM_CB = 3 + 4 * MAXPAT;                 // contains table in PT: count, then p1 m1 p2 m2 lim lo per entry
 const NM_PT_WORDS = NM_CB + 1 + 5 * MAXCONT;
 
 const INNER = 1024;
@@ -305,7 +305,7 @@ export class NmGpuJob {
     cfg.pats.slice(0, MAXPAT).forEach((p, i) => a.set([p.vh, p.vl, p.mh, p.ml], 3 + 4 * i));
     const cont = cfg.cont || [];
     a[NM_CB] = Math.min(cont.length, MAXCONT);
-    cont.slice(0, MAXCONT).forEach((c, i) => a.set([c.p1, c.m1, c.p2, c.m2, c.lim], NM_CB + 1 + 5 * i));
+    cont.slice(0, MAXCONT).forEach((c, i) => a.set([c.p1, c.m1, c.p2, c.m2, c.lim, c.lo ?? 0], NM_CB + 1 + 6 * i));
     this.device.queue.writeBuffer(this.ptbuf, 0, a);
   }
 

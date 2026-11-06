@@ -70,7 +70,7 @@ try {
   const runSearch = async (label, fields, nHits) => {
     await reset();
     await page.evaluate(() => { __skinhash.hits.length = 0; document.querySelector("#hits").innerHTML = ""; });
-    for (const [id, v] of Object.entries({ contains: "", ...fields })) { await page.$eval("#" + id, (el, val) => { el.value = val; el.dispatchEvent(new Event("input")); }, v); }
+    for (const [id, v] of Object.entries({ contains: "", patterns: "", ...fields })) { await page.$eval("#" + id, (el, val) => { el.value = val; el.dispatchEvent(new Event("input")); }, v); }
     await page.$eval("#stopn", (el, v) => { el.value = v; }, String(nHits));
     const t0 = Date.now();
     await page.click("#start");
@@ -116,6 +116,25 @@ try {
     check(v.status === 0 && /^OK/.test(v.stdout), `contains_check (Python) ${h.id.slice(0, 20)}...: ${(v.stdout + v.stderr).trim().slice(0, 80)}`);
   }
 
+  // patterns: anchored, sliding, gap (one per line), checked with the Python reference
+  const MP = ["^?{2}ab", "c0ff", "^a*f$", "^?l?d*[0-7]e$"];
+  const rp = await runSearch("Mojang patterns", { prefixes: "", suffixes: "", zeros: "0", patterns: MP.join("\n") + "\n# a comment\n" }, 4);
+  check(rp.hits.length === 4 && rp.hits.every((h) => h.whys.some((w) => w.startsWith("match:"))), "Mojang patterns: 4 hits, each matches a pattern");
+  await grab(rp);
+  for (const h of rp.hits) {
+    const v = spawnSync("py", [path.join(here, "pattern_check.py"), "mojang", path.join(outDir, h.id + ".png"), ...MP], { cwd: repo, encoding: "utf8" });
+    check(v.status === 0 && /^OK/.test(v.stdout), `pattern_check (Python) ${h.id.slice(0, 20)}...: ${(v.stdout + v.stderr).trim().slice(0, 90)}`);
+  }
+  const perr = await page.evaluate(async () => {
+    const el = document.querySelector("#patterns");
+    el.value = "^cafe\nxyz\nzeros >= 3"; el.dispatchEvent(new Event("input"));
+    const r = { info: [...document.querySelectorAll("#patinfo li")].map((li) => [li.className, li.textContent]), err: document.querySelector("#targeterr").textContent };
+    el.value = ""; el.dispatchEvent(new Event("input"));
+    return r;
+  });
+  check(perr.info.length === 3 && perr.info[0][0] === "warn" && /< 0\.1 s/.test(perr.info[0][1]) && /~1 in 6\.6e4/.test(perr.info[0][1]) && perr.info[1][0] === "bad" && /not a hex digit/.test(perr.info[1][1])
+    && /not supported yet/.test(perr.info[2][1]) && /line 2/.test(perr.err), `Patterns box: per-line odds and errors ${JSON.stringify(perr.info)}`);
+
   // 3. verify with the native tool
   for (const d of downloaded) {
     const v = spawnSync("py", ["skinhash.py", "verify", skin, d.f], { cwd: repo, encoding: "utf8" });
@@ -154,6 +173,16 @@ try {
   check(nc.hits.length === 3 && nc.hits.every((h) => h.id.length === 16 && h.id.includes("beef") && h.whys.includes("contains:beef")), "NameMC contains beef: 3 hits, 16-digit ids contain beef");
   await grab(nc);
   for (const h of nc.hits) nmCheck(path.join(outDir, h.id + ".png"), "contains:beef");
+
+  const NP = ["^?{2}a[0-3]", "be", "^1*2$"];
+  const np = await runSearch("NameMC patterns", { prefixes: "", suffixes: "", zeros: "0", patterns: NP.join(", ") }, 3);
+  check(np.hits.length === 3 && np.hits.every((h) => h.id.length === 16 && h.whys.some((w) => w.startsWith("match:"))), "NameMC patterns (comma list): 3 hits");
+  await grab(np);
+  for (const h of np.hits) {
+    const v = spawnSync("py", [path.join(here, "pattern_check.py"), "namemc", path.join(outDir, h.id + ".png"), ...NP], { cwd: repo, encoding: "utf8" });
+    check(v.status === 0 && /^OK/.test(v.stdout), `pattern_check NameMC (Python) ${h.id}: ${(v.stdout + v.stderr).trim().slice(0, 90)}`);
+    nmCheck(path.join(outDir, h.id + ".png"), "contains:");
+  }
 
   // unused pixels only: the general kernel (about 50 SHA blocks per candidate)
   await page.click("#unusedonly");

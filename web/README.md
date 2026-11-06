@@ -6,6 +6,13 @@ code, no upload; it can be hosted as-is (for example on GitHub Pages).
 
 Contains (hex) matches a hex string anywhere in the id: in the Mojang link id with leading zeros dropped, or in all 16 NameMC digits.
 
+Patterns (one per line, in each target group) take the same syntax as the native `-m` (see the main README): `^` start,
+`$` end, `?`, `?d`, `?l`, `[0-3]` classes, `{n}` repeats, `*` gaps, `#` comments and comma lists. Each line shows its odds
+and the expected time at the last measured rate (or an assumed one), or its error. "Load file" reads a `.txt` file into
+the box. The parser is `js/patterns.js` (same rules as `patterns.py` and `pattern.h`). Anchored patterns are baked into
+the generated Mojang shader as literal masks, so words without a mask cost nothing; unanchored ones use the sliding
+window of the contains check. Every hit is re-checked against the full pattern on the CPU.
+
 ## Run locally
 
     py web/serve.py            # http://127.0.0.1:8000/
@@ -19,6 +26,7 @@ answers `text/plain` for `.js` and the browser refuses to load the ES modules. N
 
 | Web | Native |
 |---|---|
+| `js/patterns.js` | `patterns.py` / `pattern.h`: pattern parser, mask compiler, matcher |
 | `js/model.js` | `skinhash.py`: UV masks, `knob_pixels`, watermark v3, `RESERVED` pixels |
 | `js/png.js` | PNG decode without canvas (canvas would premultiply alpha and destroy hidden RGB); Mojang re-encode (`mojang_png`) |
 | `js/job.js` | `fastfinder.c`: `setup_fast`, `parse_deflate`, `--auto`, self-test, test vectors, index to permutation |
@@ -85,6 +93,8 @@ pako before it is shown.
     node web/test/job.mjs          # job builder, self-test, rollover, eligibility
     node web/test/fastkernel.mjs   # fast Mojang kernel: table model vs byte-level builder, generated WGSL, equal-length preference
     node web/test/namemc.mjs       # NameMC ids, JS reference vs Python hashlib
+    node web/test/patterns.mjs     # patterns: parser, errors, odds, masks, the Patterns box, prefilter soundness
+    node web/test/patterns_gpu.mjs # generated pattern WGSL on the GPU vs the JS model (needs WEBTEST_DIR)
     node web/test/browser_test.mjs # Chrome + WebGPU end to end (Mojang and NameMC modes, combined flow), checks the downloads with skinhash.py and namemc_check.py; also imports Dinnerbone by name (a few playerdb/Mojang lookups)
 
 `browser_test.mjs` needs `puppeteer-core`, which is deliberately not in this repo: install it in a scratch

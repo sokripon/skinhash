@@ -58,3 +58,14 @@ fieldset.grp { border: 0; padding: 0; margin: 8px 0; min-width: 0; }
 fieldset.grp.boxed { border: 1px solid var(--line); border-radius: 8px; padding: 8px 12px 12px; }
 fieldset.grp legend { font-size: .9rem; font-weight: 600; padding: 0 6px; }
 #phasebox { white-space: pre-line; font-size: .9rem; }
+.patbox { margin-top: 10px; }
+.pathead { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 3px; }
+.pathead label { flex-direction: row; }
+button.small { padding: 3px 10px; font-size: .85rem; border-radius: 6px; }
+textarea { font: .9rem/1.4 ui-monospace, Consolas, monospace; padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--card); color: var(--fg); width: 100%; resize: vertical; box-sizing: border-box; }
+.patinfo { list-style: none; padding: 0; margin: 4px 0 0; font-size: .8rem; color: var(--muted); display: grid; gap: 1px; }
+.patinfo li code { font-size: .8rem; }
+.patinfo li.bad { color: inherit; background: var(--err); border-radius: 4px; padding: 1px 6px; }
+.patinfo li.warn { background: var(--warn); border-radius: 4px; padding: 1px 6px; color: var(--fg); }
+.pathelp { margin: 6px 0 0; }
+.pathelp summary { cursor: pointer; }

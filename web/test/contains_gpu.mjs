@@ -34,7 +34,7 @@ try {
     const out = [];
     for (const nm of [false, true]) {
       const W = nm ? 2 : 8, width = W * 8, cb = nm ? 3 + 4 * 32 : CB;
-      const ptWords = nm ? cb + 1 + 5 * 16 : PT_WORDS;
+      const ptWords = nm ? cb + 1 + 6 * 32 : PT_WORDS;
       const words = Array.from({ length: W }, (_, i) => `s${i}`);
       const code = `
 @group(0) @binding(0) var<storage, read> IN: array<u32>;
@@ -64,7 +64,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         for (let k = 0; k < n; k++) text += "0123456789abcdef"[(round % 3 === 0 ? (rnd() & 1) * 15 : rnd()) & 15];
         const g = gpuContains({ kind: "contains", text }, width);
         const pt = new Uint32Array(ptWords);
-        pt[cb] = 1; pt.set([g.p1, g.m1, g.p2, g.m2, g.lim], cb + 1);
+        pt[cb] = 1; pt.set([g.p1, g.m1, g.p2, g.m2, g.lim, g.lo], cb + 1);
         const inp = new Uint32Array(N * W), zl = new Uint32Array(N);
         const hexes = [];
         for (let i = 0; i < N; i++) {

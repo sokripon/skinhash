@@ -43,7 +43,7 @@ check(gpuNmTargets(tl).cont[0].lim === 12, "gpuNmTargets uses 16 digits");
 // the WGSL: absent without contains, present with it, windows reach every offset
 check(!/contains/.test(hitCode(false)) && !hitCode(false).includes("mn = min"), "no contains code in the kernel when no contains target exists");
 const wc = hitCode(true);
-check((wc.match(/mn = min/g) || []).length === 64 && /63u <= lim && 63u >= zn/.test(wc), "contains code: 64 offsets and the leading-zero test against zn");
+check((wc.match(/mn = min/g) || []).length === 64 && /63u <= lim && 63u >= lo\)/.test(wc) && /select\(0u, zn, \(lw >> 16u\) != 0u\)/.test(wc), "contains code: 64 offsets and the range test (lo plus the leading zeros zn)");
 
 console.log(fails ? `\n${fails} FAILURE(S)` : "\nALL TARGET TESTS PASSED");
 process.exit(fails ? 1 : 0);

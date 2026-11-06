@@ -853,7 +853,7 @@ class RecordStore:
             print("records:", flush=True)
             for t, e in rows:
                 note = NOTES.get((self.width, t), e.get("note", ""))
-            print(f"  {t:<24} {e['value']:>4}  {e['id']}  {e['file']}" + (f"  # {note}" if note else ""), flush=True)
+                print(f"  {t:<24} {e['value']:>4}  {e['id']}  {e['file']}" + (f"  # {note}" if note else ""), flush=True)
 
 
 RECORDS = None     # the RecordStore of the running search

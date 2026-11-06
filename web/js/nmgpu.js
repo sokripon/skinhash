@@ -6,9 +6,11 @@
 //           live in a storage buffer.
 import { K256 } from "./hash.js";
 import { MAXHITS, MAXPAT, MAXCONT, HITS_WORDS, containsCode } from "./wgsl.js";
+import { MAXSTAT, statLib, statCode, recordInit } from "./wgslstat.js";
 
 const NM_CB = 3 + 4 * MAXPAT;                 // contains table in PT: count, then p1 m1 p2 m2 lim lo per entry
-const NM_PT_WORDS = NM_CB + 1 + 5 * MAXCONT;
+export const NM_SE = NM_CB + 1 + 6 * MAXCONT;   // enable words of the stat lines
+const NM_PT_WORDS = NM_SE + MAXSTAT;
 
 const INNER = 1024;
 const hex = (v) => `0x${(v >>> 0).toString(16)}u`;
@@ -144,7 +146,7 @@ export function nmDerive(prep) {
   return { img, kw, isc, pblk, pwd };
 }
 
-export function genNmShader(prep, wg = 256, nTests = 96, contains = false) {
+export function genNmShader(prep, wg = 256, nTests = 96, contains = false, stat = null) {
   const D = nmDerive(prep), fast = prep.fast, nb = prep.nb;
   const mid = Array.from(prep.mid).map((x, i) => `var s${i} = ${hex(x)};`).join(" ");
   const off = { IMG: 0, KW: nb * 16, ISC: nb * 80, PBLK: nb * 81, PWD: nb * 81 + 3 };
@@ -175,7 +177,7 @@ fn note_best(m0: u32, m1: u32) {
   let zn = select(select(16u, 8u + (countLeadingZeros(m1) >> 2u), m1 != 0u), countLeadingZeros(m0) >> 2u, m0 != 0u);
   if (zn > 0u && zn > atomicLoad(&HITS[1])) { atomicMax(&HITS[1], zn); }
 }
-fn nm_vw(lo: u32, hi: u32) -> vec3<u32> {
+${stat ? statLib(2) : ""}fn nm_vw(lo: u32, hi: u32) -> vec3<u32> {
   return vec3<u32>(((hi >> 16u) << 8u) | 1u,
                    ((((lo >> 24u) | (hi << 8u)) & 0xFFFFFFu) << 8u) | 1u,
                    ((lo & 0xFFFFFFu) << 8u) | 1u);
@@ -217,7 +219,8 @@ ${FP.pre}
     let p11 = ((l24 + t) << 8u) | 1u;
 ${FP.body}
     if (s0 < m0 || (s0 == m0 && s1 < m1)) { m0 = s0; m1 = s1; }
-    if (is_hit(s0, s1)) { record(lo + t, hi); }
+${stat ? `    var hit = is_hit(s0, s1);
+${statCode(stat.lines, ["s0", "s1"], { zl: "0u", SE: NM_SE })}    if (hit) { record(lo + t, hi); }` : "    if (is_hit(s0, s1)) { record(lo + t, hi); }"}
   }
   note_best(m0, m1);
 }
@@ -227,7 +230,8 @@ ${FP.body}
   let hi = DP[2] + select(0u, 1u, lo < DP[1]);
   let v = nm_vw(lo, hi);
   let id = nm_id(v.x, v.y, v.z);
-  if (is_hit(id.x, id.y)) { record(lo, hi); }
+${stat ? `  var hit = is_hit(id.x, id.y);
+${statCode(stat.lines, ["id.x", "id.y"], { zl: "0u", SE: NM_SE })}  if (hit) { record(lo, hi); }` : "  if (is_hit(id.x, id.y)) { record(lo, hi); }"}
   note_best(id.x, id.y);
 }
 `;
@@ -251,9 +255,10 @@ ${FP.body}
 const U = GPUBufferUsage;
 
 export class NmGpuJob {
-  constructor(device, prep, tests, { wg = 256, contains = false } = {}) {
-    this.device = device; this.prep = prep; this.tests = tests; this.wg = wg;
-    const g = genNmShader(prep, wg, tests.length, contains);
+  /** stat: {lines: [StatLine]} (threshold and record lines baked into the shader) or null */
+  constructor(device, prep, tests, { wg = 256, contains = false, stat = null } = {}) {
+    this.device = device; this.prep = prep; this.tests = tests; this.wg = wg; this.stat = stat;
+    const g = genNmShader(prep, wg, tests.length, contains, stat);
     this.wgsl = g.wgsl; this.D = g.D; this.off = g.off;
     this.per = prep.fast ? INNER : 1;
     this.maxThreads = prep.fast ? 1 << 19 : 1 << 23;
@@ -283,6 +288,7 @@ export class NmGpuJob {
       d.queue.writeBuffer(this.kbuf, 0, a);
     }
     this.ptbuf = mk(NM_PT_WORDS * 4, U.STORAGE | U.COPY_DST);
+    if (this.stat?.lines.some((l) => l.record)) { this.rbuf = mk(MAXSTAT * 4, U.STORAGE | U.COPY_DST); this.setRecordBests(this.recBests || []); }
     this.setTargets(this.cfg);
     const entries = (extra) => [...(prep.fast ? [] : [{ binding: 0, resource: { buffer: this.kbuf } }]), ...extra];
     this.entries = entries;
@@ -291,7 +297,8 @@ export class NmGpuJob {
       const hits = mk(HITS_WORDS * 4, U.STORAGE | U.COPY_SRC | U.COPY_DST);
       const staging = mk(HITS_WORDS * 4, U.MAP_READ | U.COPY_DST);
       const bind = d.createBindGroup({ layout: this.search.getBindGroupLayout(0), entries: entries([
-        { binding: 1, resource: { buffer: this.ptbuf } }, { binding: 2, resource: { buffer: dp } }, { binding: 3, resource: { buffer: hits } }]) });
+        { binding: 1, resource: { buffer: this.ptbuf } }, { binding: 2, resource: { buffer: dp } }, { binding: 3, resource: { buffer: hits } },
+        ...(this.rbuf ? [{ binding: 5, resource: { buffer: this.rbuf } }] : [])]) });
       return { dp, hits, staging, bind };
     });
   }
@@ -306,7 +313,19 @@ export class NmGpuJob {
     const cont = cfg.cont || [];
     a[NM_CB] = Math.min(cont.length, MAXCONT);
     cont.slice(0, MAXCONT).forEach((c, i) => a.set([c.p1, c.m1, c.p2, c.m2, c.lim, c.lo ?? 0], NM_CB + 1 + 6 * i));
+    if (this.stat) this.stat.lines.forEach((l, i) => { a[NM_SE + i] = !l.record && (cfg.statKeys || []).includes(`stat:${l.text}`) ? 1 : 0; });
     this.device.queue.writeBuffer(this.ptbuf, 0, a);
+  }
+
+  /** Best value of every record line (null: none yet), in line order; the device keeps its own copy while searching. */
+  setRecordBests(bests) {
+    this.recBests = bests;
+    if (this.rbuf) this.device.queue.writeBuffer(this.rbuf, 0, recordInit(this.stat.lines, bests));
+  }
+
+  /** Raise one record line's best on the device (the page calls it for lines the GPU does not compute exactly). */
+  raiseRecord(i, v) {
+    if (this.rbuf) this.device.queue.writeBuffer(this.rbuf, 4 * i, new Int32Array([v]));
   }
 
   async gate() {
@@ -381,6 +400,6 @@ export class NmGpuJob {
   }
 
   destroy() {
-    for (const b of [this.kbuf, this.ptbuf, ...(this.slots || []).flatMap((s) => [s.dp, s.hits, s.staging])]) b?.destroy();
+    for (const b of [this.kbuf, this.ptbuf, this.rbuf, ...(this.slots || []).flatMap((s) => [s.dp, s.hits, s.staging])]) b?.destroy();
   }
 }

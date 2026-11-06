@@ -66,6 +66,7 @@
 typedef unsigned long long u64;
 typedef uint32_t u32;
 typedef uint8_t u8;
+#include "gpustat.cuh"
 
 /* job */
 struct Pat { u64 val, mask; u32 suffix; char text[24]; };
@@ -296,7 +297,7 @@ __device__ __forceinline__ bool anchored_hit(const u32 (&s)[8]) {
  * TEST: evaluate only ordering t = tlo and write the 8 digest words to out.
  * otherwise: test every candidate against the patterns and record hits.
  */
-template <bool TEST, bool CONT, bool ANCH>
+template <bool TEST, bool CONT, bool ANCH, bool STAT = false>
 __device__ __forceinline__ void run_outer(const BaseDigits &bd, u32 gid, u32 tlo, u32 thi, u64 obase,
                                           const u32 *s_crc, const u32 *s_gt, const u32 *s_tab, const u32 *s_val, u32 *out) {
     u32 img[MAXBLK * 16];
@@ -416,6 +417,10 @@ __device__ __forceinline__ void run_outer(const BaseDigits &bd, u32 gid, u32 tlo
             if (ANCH) hit = anchored_hit(s8);
             if (CONT && !hit) hit = contains_hit(s8, zn);
         }
+        if (STAT) {
+            Dg<8> dg = {{s[0], s[1], s[2], s[3], s[4], s[5], s[6], s[7]}};
+            if (stat_check<8>(dg)) hit = true;
+        }
         if (hit) {
             u32 pos = atomicAdd(&d_nhits, 1u);
             if (pos < MAXHITS) d_hits[pos] = (obase + gid) * NPERM + t;
@@ -431,13 +436,13 @@ __device__ __forceinline__ void load_shared(u32 *s_crc, u32 *s_gt, u32 *s_tab, u
     __syncthreads();
 }
 
-template <bool CONT, bool ANCH>
+template <bool CONT, bool ANCH, bool STAT = false>
 __global__ void __launch_bounds__(BLOCK, MINB) search_kernel(BaseDigits bd, u64 obase, u32 count) {
     __shared__ u32 s_crc[256], s_gt[6 * 256], s_tab[64], s_val[64];
     load_shared(s_crc, s_gt, s_tab, s_val);
     u32 gid = blockIdx.x * BLOCK + threadIdx.x;
     if (gid >= count) return;
-    run_outer<false, CONT, ANCH>(bd, gid, 0, NPERM, obase, s_crc, s_gt, s_tab, s_val, nullptr);
+    run_outer<false, CONT, ANCH, STAT>(bd, gid, 0, NPERM, obase, s_crc, s_gt, s_tab, s_val, nullptr);
 }
 
 /* gate: thread i evaluates ordering t[i] of outer = (digits bd[i]) + gid[i] */
@@ -496,7 +501,7 @@ __device__ __forceinline__ void sha_rnd(ShaSt &s, u32 kw) {
     s.h = s.g; s.g = s.f; s.f = s.e; s.e = s.d + t1; s.d = s.c; s.c = s.b; s.b = s.a; s.a = t1 + t2;
 }
 
-template <int WI, int KB, bool TEST, bool CONT, bool ANCH>
+template <int WI, int KB, bool TEST, bool CONT, bool ANCH, bool STAT = false>
 __device__ __forceinline__ void run_outer_fast(const BaseDigits &bd, u32 gid, u32 tlo, u32 thi, u64 obase,
                                                const u32 *s_crc, const u32 *s_gt, const u32 *s_tab, const u32 *s_val,
                                                const uint4 *s_y, const uint2 *s_cb, u32 *out) {
@@ -623,6 +628,10 @@ __device__ __forceinline__ void run_outer_fast(const BaseDigits &bd, u32 gid, u3
             if (ANCH) hit = anchored_hit(s8);
             if (CONT && !hit) hit = contains_hit(s8, zn);
         }
+        if (STAT) {
+            Dg<8> dg = {{s[0], s[1], s[2], s[3], s[4], s[5], s[6], s[7]}};
+            if (stat_check<8>(dg)) hit = true;
+        }
         if (hit) {
             u32 pos = atomicAdd(&d_nhits, 1u);
             if (pos < MAXHITS) d_hits[pos] = (obase + gid) * NPERM + t;
@@ -636,7 +645,7 @@ __device__ __forceinline__ void load_shared_fast(u32 *s_crc, u32 *s_gt, u32 *s_t
     load_shared(s_crc, s_gt, s_tab, s_val);   /* ends with __syncthreads() */
 }
 
-template <int WI, int KB, bool CONT, bool ANCH>
+template <int WI, int KB, bool CONT, bool ANCH, bool STAT = false>
 __global__ void __launch_bounds__(BLOCK, MINB) search_fast(BaseDigits bd, u64 obase, u32 count) {
     __shared__ u32 s_crc[256], s_gt[6 * 256], s_tab[64], s_val[64];
     __shared__ uint4 s_y[4 * 20];
@@ -644,7 +653,7 @@ __global__ void __launch_bounds__(BLOCK, MINB) search_fast(BaseDigits bd, u64 ob
     load_shared_fast(s_crc, s_gt, s_tab, s_val, s_y, s_cb);
     u32 gid = blockIdx.x * BLOCK + threadIdx.x;
     if (gid >= count) return;
-    run_outer_fast<WI, KB, false, CONT, ANCH>(bd, gid, 0, NPERM, obase, s_crc, s_gt, s_tab, s_val, s_y, s_cb, nullptr);
+    run_outer_fast<WI, KB, false, CONT, ANCH, STAT>(bd, gid, 0, NPERM, obase, s_crc, s_gt, s_tab, s_val, s_y, s_cb, nullptr);
 }
 
 template <int WI, int KB>
@@ -663,7 +672,7 @@ __global__ void test_fast(const BaseDigits *bds, const u32 *gids, const u32 *ts,
 
 typedef void (*SearchFn)(BaseDigits, u64, u32);
 typedef void (*TestFn)(const BaseDigits *, const u32 *, const u32 *, u32 *, int);
-struct FastFns { SearchFn search[4]; TestFn test; };   /* search[contains | anchored << 1] */
+struct FastFns { SearchFn search[5]; TestFn test; };   /* search[contains | anchored << 1], [4] = stat lines (all on) */
 #if defined(DEV_WI) && !defined(FAST_PAIRS)
 #define FAST_PAIRS(X) X(DEV_WI, DEV_KB)
 #endif
@@ -671,9 +680,14 @@ struct FastFns { SearchFn search[4]; TestFn test; };   /* search[contains | anch
 #define FAST_PAIRS(X) X(2,3) X(2,4) X(2,5) X(3,4) X(3,5) X(3,6) X(4,5) X(4,6) X(4,7) X(5,6) X(5,7) X(5,8)     X(6,7) X(6,8) X(6,9) X(7,8) X(7,9) X(7,10) X(8,9) X(8,10) X(8,11) X(9,10) X(9,11) X(10,11)
 #endif
 static bool pick_fast(int WI, int KB, FastFns &f) {
+#ifdef DEV_ONLY   /* experiments: only the stat kernel */
+#define X(a, b) if (WI == a && KB == b) { f.search[0] = f.search[4] = search_fast<a, b, true, true, true>; f.test = test_fast<a, b>; return true; }
+#else
 #define X(a, b) if (WI == a && KB == b) { f.search[0] = search_fast<a, b, false, false>; f.search[1] = search_fast<a, b, true, false>; \
                                               f.search[2] = search_fast<a, b, false, true>; f.search[3] = search_fast<a, b, true, true>; \
+                                              f.search[4] = search_fast<a, b, true, true, true>; \
                                               f.test = test_fast<a, b>; return true; }
+#endif
     FAST_PAIRS(X)
 #undef X
     return false;
@@ -787,6 +801,8 @@ static int clz64h(u64 x) { int n = 0; while (!(x >> 63)) { x <<= 1; n++; } retur
 
 static std::vector<CPat> g_cont;
 static std::vector<mpat_t> g_mp;
+static std::vector<sline_t> g_sl;       /* stat lines (gpustat.cuh) */
+static int g_best[ST_MAXLINES];         /* host copy of the record bests */
 static const char *match_why(const Job &J, const u8 d[32], std::string &why) {
     u64 hi = 0, mi = 0, lo = 0;
     for (int i = 0; i < 8; i++) { hi = hi << 8 | d[i]; mi = mi << 8 | d[8 + i]; lo = lo << 8 | d[24 + i]; }
@@ -1018,6 +1034,7 @@ static bool derive_fast(const Job &J, const DevData &D, FastData &F) {
 }
 
 int main(int argc, char **argv) {
+    if (argc >= 2 && !strcmp(argv[1], "--stat-selftest")) return stat_selftest_cli<8>(argc, argv);
     if (argc < 3) { fprintf(stderr, "usage: gpufinder job.bin OUTDIR [-p HEX]... [-s HEX]... [-c HEX]... [-m PATTERN]... [-z N] [-S SEED] [-n N] [-b]\n"); return 1; }
     Job J;
     if (!load_job(argv[1], J)) { fprintf(stderr, "gpufinder: cannot read job file %s\n", argv[1]); return 1; }
@@ -1028,6 +1045,7 @@ int main(int argc, char **argv) {
     u64 tried_off = 0;
     u64 seed = (u64)std::chrono::system_clock::now().time_since_epoch().count() * 0x9E3779B97F4A7C15ULL;
     std::vector<Pat> cli;
+    int selftest = 0, best_arg[ST_MAXLINES] = {0}, have_best[ST_MAXLINES] = {0};
     for (int i = 3; i < argc; i++) {
         const char *a = argv[i], *v = i + 1 < argc ? argv[i + 1] : nullptr;
         Pat p;
@@ -1039,6 +1057,17 @@ int main(int argc, char **argv) {
             CPat c;
             if (!parse_contains(v, c) || g_cont.size() >= MAXCONT) { fprintf(stderr, "bad -c %s\n", v); return 1; }
             g_cont.push_back(c); i++;
+        }
+        else if (!strcmp(a, "--stat-selftest")) selftest = 1;
+        else if (!strcmp(a, "--best") && i + 2 < argc) {
+            int li = atoi(argv[i + 1]);
+            if (li < 0 || li >= ST_MAXLINES) { fprintf(stderr, "bad --best\n"); return 1; }
+            best_arg[li] = atoi(argv[i + 2]); have_best[li] = 1; i += 2;
+        }
+        else if (!strcmp(a, "-m") && v && st_is_stat(v)) {
+            sline_t sl; char err[256];
+            if (sline_parse(v, 64, &sl, err, sizeof err) || g_sl.size() >= ST_MAXLINES) { fprintf(stderr, "bad -m %s %s\n", v, err); return 1; }
+            g_sl.push_back(sl); i++;
         }
         else if (!strcmp(a, "-m") && v) {
             mpat_t mp; char err[256];
@@ -1081,7 +1110,7 @@ int main(int argc, char **argv) {
     static FastData FD;
     static u32 gt_generic[6 * 256];
     memcpy(gt_generic, D.gt, sizeof gt_generic);
-    FastFns fns = {{nullptr, nullptr, nullptr, nullptr}, nullptr};
+    FastFns fns = {{nullptr, nullptr, nullptr, nullptr, nullptr}, nullptr};
     if (!force_generic && derive_fast(J, D, FD)) {
         if (pick_fast(FD.WI, FD.KB, fns)) {
             memcpy(gt_generic, D.gt, sizeof gt_generic);
@@ -1126,7 +1155,19 @@ int main(int argc, char **argv) {
         CK(cudaMemcpyToSymbol(c_na, &n_anch, 4));
         CK(cudaMemcpyToSymbol(c_am, am, sizeof am));
     }
-    const int kv = (g_cont.empty() ? 0 : 1) | (n_anch ? 2 : 0);   /* kernel variant: sliding check, anchored check */
+    int kv = (g_cont.empty() ? 0 : 1) | (n_anch ? 2 : 0);   /* kernel variant: sliding check, anchored check */
+    StatTables ST;
+    if (!g_sl.empty()) {
+        char err[256];
+        if (!stat_build(g_sl, 8, ST, err, sizeof err)) { fprintf(stderr, "gpufinder: %s\n", err); return 1; }
+        for (size_t i = 0; i < g_sl.size(); i++) {
+            const int r = g_sl[i].rec_term >= 0 ? g_sl[i].t[g_sl[i].rec_term].rec : 0;
+            g_best[i] = have_best[i] ? best_arg[i] : (r == 2 ? ST_NONE_MIN : ST_NONE_MAX);
+        }
+        stat_upload<8>(ST, g_best);
+        kv = 4;
+    }
+    if (selftest) return stat_selftest_main<8>(g_sl, ST);
 
     const u32 m = J.m;
     const u64 RF = fact_h(RIN), mfact = fact_h((int)m), NOUT = mfact / RF;
@@ -1192,7 +1233,7 @@ int main(int argc, char **argv) {
         int bad = run_gate(fns.test != nullptr);
         if (bad && fns.test) {
             fprintf(stderr, "gate: the fast kernel differs from the reference on %d of %d vectors; using the generic kernel\n", bad, nt);
-            fns.search[0] = fns.search[1] = fns.search[2] = fns.search[3] = nullptr; fns.test = nullptr; FD.why = "fast kernel failed the gate";
+            fns.search[0] = fns.search[1] = fns.search[2] = fns.search[3] = fns.search[4] = nullptr; fns.test = nullptr; FD.why = "fast kernel failed the gate";
             CK(cudaMemcpyToSymbol(c_gt, gt_generic, sizeof gt_generic));
             bad = run_gate(false);
         }
@@ -1221,10 +1262,13 @@ int main(int argc, char **argv) {
         BaseDigits bd; digits_of(obase, bd);
         const unsigned grid = (unsigned)((cnt + BLOCK - 1) / BLOCK);
         if (fns.search[0]) fns.search[kv]<<<grid, BLOCK>>>(bd, obase, (u32)cnt);
+#ifndef DEV_ONLY
         else if (kv == 0) search_kernel<false, false><<<grid, BLOCK>>>(bd, obase, (u32)cnt);
         else if (kv == 1) search_kernel<true, false><<<grid, BLOCK>>>(bd, obase, (u32)cnt);
         else if (kv == 2) search_kernel<false, true><<<grid, BLOCK>>>(bd, obase, (u32)cnt);
-        else search_kernel<true, true><<<grid, BLOCK>>>(bd, obase, (u32)cnt);
+        else if (kv == 3) search_kernel<true, true><<<grid, BLOCK>>>(bd, obase, (u32)cnt);
+#endif
+        else search_kernel<true, true, true><<<grid, BLOCK>>>(bd, obase, (u32)cnt);
         CK(cudaGetLastError());
         CK(cudaDeviceSynchronize());
         tried += cnt * RF;
@@ -1247,7 +1291,19 @@ int main(int argc, char **argv) {
                 std::vector<u8> file = host_file(J, idx);
                 u8 d[32]; sha256_h(file.data(), file.size(), d);
                 std::string why;
-                if (!match_why(J, d, why)) { fprintf(stderr, "gpufinder: GPU hit idx %llu fails CPU re-check (ignored)\n", (unsigned long long)idx); continue; }
+                bool tw = match_why(J, d, why);
+                stat_res_t sr; sr.thr = -1; sr.nrec = 0;
+                if (!g_sl.empty()) {
+                    stat_find(g_sl.data(), (int)g_sl.size(), d, g_best, &sr);
+                    if (!tw && sr.thr >= 0) { why = std::string("match:") + g_sl[sr.thr].text; tw = true; }
+                    int k = 0;
+                    for (int j = 0; j < sr.nrec; j++) {
+                        const int li = sr.rline[j], v = sr.rval[j];
+                        if (st_beats(g_sl[li].t[g_sl[li].rec_term].rec, v, g_best[li])) { g_best[li] = v; sr.rline[k] = li; sr.rval[k++] = v; }
+                    }
+                    sr.nrec = k;
+                }
+                if (!tw && !sr.nrec) { fprintf(stderr, "gpufinder: GPU hit idx %llu fails CPU re-check (ignored)\n", (unsigned long long)idx); continue; }
                 char hex[65]; hexify(d, hex);
                 const char *url = hex;
                 while (*url == '0' && url[1]) url++;
@@ -1257,11 +1313,19 @@ int main(int argc, char **argv) {
                     if (!fp) { fprintf(stderr, "cannot write %s\n", path.c_str()); return 1; }
                     fwrite(file.data(), 1, file.size(), fp); fclose(fp);
                 }
-                printf("HIT %s sha=%s id=%s counter=%llu file=%s\n", why.c_str(), hex, url, (unsigned long long)idx, path.c_str());
-                fflush(stdout);
-                nhit_total++;
-                if (max_hits > 0 && (long long)nhit_total >= max_hits) { stop = true; break; }
+                if (tw) {
+                    printf("HIT %s sha=%s id=%s counter=%llu file=%s\n", why.c_str(), hex, url, (unsigned long long)idx, path.c_str());
+                    fflush(stdout);
+                    nhit_total++;
+                }
+                for (int j = 0; j < sr.nrec; j++) {
+                    printf("HIT record:%s=%d sha=%s id=%s counter=%llu file=%s\n", g_sl[sr.rline[j]].text, sr.rval[j], hex, url, (unsigned long long)idx, path.c_str());
+                    fflush(stdout);
+                }
+                if (tw && max_hits > 0 && (long long)nhit_total >= max_hits) { stop = true; break; }
             }
+            for (size_t li = 0; li < g_sl.size(); li++)    /* lines the device cannot raise itself */
+                if (g_sl[li].rec_term >= 0 && !ST.lines[li].exact) { int b = g_best[li]; CK(cudaMemcpyToSymbol(d_rbest, &b, 4, li * 4)); }
         }
         if (covered >= NOUT) { exhausted = true; stop = true; }
         double t = now_s();

@@ -66,6 +66,19 @@
       Mojang: <code>^</code> is the start of the full 64-digit hash, so <code>^0{12}</code> is 12 leading zeros; without <code>^</code> the
       pattern must be in the link id (after the leading zeros). NameMC: the 16 digits. <code># comments</code> and comma lists work.
       A hit matches any line.
+      <p><b>Counts, shapes and records.</b> Spaces and capitals are free. Mojang: counts and shapes look at the link id (leading zeros dropped).</p>
+      <table class="stathelp">
+        <tr><td><code>#0{24,}</code></td><td>at least 24 zeros (<code>{n}</code> exactly, <code>{n,}</code> at least, <code>{,n}</code> at most, <code>{n,m}</code>)</td></tr>
+        <tr><td><code>#?l{,0}</code> <code>#?l{50,}</code></td><td>letters a-f: none / at least 50 (<code>#?d</code> digits, <code>#[0-3]</code> any class)</td></tr>
+        <tr><td><code>##{,9}</code></td><td>at most 9 different digits</td></tr>
+        <tr><td><code>#(dead|beef|cafe){3,}</code></td><td>words (1-8 digits) found at least 3 times together, overlaps count</td></tr>
+        <tr><td><code>(?)\1{11}</code></td><td>one digit 12 times in a row (<code>(??)\1{6}</code> a pair 7 times = a zigzag like 7c7c7c7c7c7c7c; <code>(?{3})\1{4}</code> a triple, period 1 to 8)</td></tr>
+        <tr><td><code>+{12}</code> <code>-{12}</code></td><td>staircase up / down of 12 digits (no wrap from f to 0)</td></tr>
+        <tr><td><code>~{25}</code></td><td>a palindrome of at least 25 digits</td></tr>
+        <tr><td><code>^f{max}</code> <code>0{max}</code></td><td>the longest run of that digit: from the start / anywhere</td></tr>
+        <tr><td><code>A &amp; B</code></td><td>all parts must hold: <code>^dead &amp; #0{10,}</code></td></tr>
+        <tr><td><code>~{max}</code> <code>+{max}</code> <code>#?l{min}</code> <code>##{min}</code></td><td>record lines: no end, every new best is listed as <b>RECORD</b> (<code>{max}</code> for counts, shapes and runs, <code>{min}</code> for counts and <code>##</code>), at most one per line. Records do not count as hits, the search runs until you press Stop, the best is kept while this page is open.</td></tr>
+      </table>
     </details>
     </fieldset>
     <fieldset class="grp" id="g2" hidden><legend>Phase 2: Mojang</legend>
@@ -90,6 +103,7 @@
     <div class="row">
       <button id="start" class="primary" disabled>Start search</button>
       <button id="stop" disabled>Stop</button>
+      <button id="resetrec" class="small" title="Forget the best values of record lines ({max} / {min}) found in this session">Forget records</button>
       <button id="bench" disabled title="10 second speed test">Benchmark (10 s)</button>
     </div>
   </section>

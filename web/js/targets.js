@@ -20,13 +20,16 @@ export function parseHexList(text, kind, allowLeadingZero = false) {
   return { list: out, errors };
 }
 
-/** Targets: {prefixes:[], suffixes:[], contains:[], patterns:[Pattern], zeros:Number} -> list of {kind, text}. */
-export function targetList({ prefixes, suffixes, contains = [], patterns = [], zeros }) {
+/** Targets: {prefixes:[], suffixes:[], contains:[], patterns:[Pattern], stats:[StatLine], zeros:Number} -> list of
+ *  {kind, text}. A stat line is a normal target (kind "stat"); a record line ({max}/{min}, kind "record") is not: it
+ *  has a best value (t.best, null until the first record) and is never "found". */
+export function targetList({ prefixes, suffixes, contains = [], patterns = [], stats = [], zeros }) {
   const t = [];
   prefixes.forEach((p) => t.push({ kind: "prefix", text: p }));
   suffixes.forEach((s) => t.push({ kind: "suffix", text: s }));
   contains.forEach((c) => t.push({ kind: "contains", text: c }));
   patterns.forEach((p) => t.push({ kind: "match", text: p.text, pattern: p }));
+  stats.forEach((l) => t.push({ kind: l.record ? "record" : "stat", text: l.text, pattern: l, ...(l.record ? { best: null } : {}) }));
   if (zeros > 0) t.push({ kind: "zeros", text: String(zeros) });
   return t;
 }
@@ -40,6 +43,11 @@ export function patternOf(t, width) {
   return patCache.get(k);
 }
 export const targetKey = (t) => `${t.kind}:${t.text}`;
+export const isRecord = (t) => t.kind === "record";
+/** The stat lines (threshold and record) of a target list for one width, in target order: what the GPU kernels bake in. */
+export const statLinesOf = (targets, width) => targets.filter((t) => t.kind === "stat" || t.kind === "record").map((t) => patternOf(t, width));
+/** The record lines of a target list (kernel order). */
+export const recordTargets = (targets) => targets.filter(isRecord);
 
 /** GPU pattern (64-bit value/mask split into u32 halves). */
 export function gpuPattern(t) {
@@ -81,6 +89,7 @@ export function gpuTargets(targets) {
     cont: [...targets.filter((t) => t.kind === "contains").map((t) => gpuContains(t, 64)),
       ...targets.filter((t) => t.kind === "match" && patternOf(t, 64).prefilter().kind === "sliding").map((t) => gpuSliding(patternOf(t, 64).prefilter()))],
     anchKeys: targets.filter((t) => t.kind === "match").map(targetKey),
+    statKeys: targets.filter((t) => t.kind === "stat").map(targetKey),
     zeros: targets.find((t) => t.kind === "zeros") ? Number(targets.find((t) => t.kind === "zeros").text) : 0,
   };
 }
@@ -94,7 +103,7 @@ export function matchTargets(hex, targets, fixed = false) {
     t.kind === "prefix" ? id.startsWith(t.text) :
     t.kind === "suffix" ? hex.endsWith(t.text) :
     t.kind === "contains" ? id.includes(t.text) :
-    t.kind === "match" ? patternOf(t, fixed ? 16 : 64).match(hex) :
+    t.kind === "match" || t.kind === "stat" || t.kind === "record" ? patternOf(t, fixed ? 16 : 64).match(hex) :
     zeros >= Number(t.text));
 }
 
@@ -103,7 +112,8 @@ export function expectedTries(t, fixed = false) {
   if (t.kind === "zeros") return Math.pow(16, Number(t.text));
   // contains: (L - n + 1) places of 16^-n each; L = 16 for NameMC, about 60 digits for a Mojang link
   if (t.kind === "contains") return Math.pow(16, t.text.length) / Math.max(1, (fixed ? 16 : 60) - t.text.length + 1);
-  if (t.kind === "match") { const p = patternOf(t, fixed ? 16 : 64).probability(); return p > 0 ? 1 / p : Infinity; }
+  if (t.kind === "match" || t.kind === "stat") { const p = patternOf(t, fixed ? 16 : 64).probability(); return p > 0 ? 1 / p : Infinity; }
+  if (t.kind === "record") { const p = patternOf(t, fixed ? 16 : 64).probability(t.best ?? null); return p > 0 ? 1 / p : Infinity; }
   return Math.pow(16, t.text.length) * (t.kind === "prefix" && !fixed ? 16 / 15 : 1);
 }
 
@@ -117,7 +127,8 @@ export function gpuNmTargets(targets) {
     const { mw, vw } = p.words();
     return { vh: vw[0], vl: vw[1], mh: mw[0], ml: mw[1], suffix: false };
   });
-  return { pats: [...targets.filter((t) => t.kind === "prefix" || t.kind === "suffix").map(gpuPattern), ...anch],
+  return { statKeys: targets.filter((t) => t.kind === "stat").map(targetKey),
+    pats: [...targets.filter((t) => t.kind === "prefix" || t.kind === "suffix").map(gpuPattern), ...anch],
     cont: [...targets.filter((t) => t.kind === "contains").map((t) => gpuContains(t, 16)),
       ...nmMatch.filter((p) => p.prefilter().kind === "sliding").map((p) => gpuSliding(p.prefilter()))], zmode, zthr };
 }

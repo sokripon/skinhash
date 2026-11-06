@@ -209,13 +209,58 @@ static const char *contains_find(const uint8_t *dg, int nbytes, int first) {
 static mpat_t mpats[MAX_PAT];
 static int nmpats = 0;
 
+/* Stat lines (-m with #, ~, +, -, (?), & or {max}/{min}; pattern.h). Record lines keep their best value in
+ * g_rbest (--best IDX VALUE sets the start value, IDX = position among the stat lines). */
+static sline_t slines[ST_MAXLINES];
+static int nslines = 0;
+static _Atomic int g_rbest[ST_MAXLINES];
+
 static int parse_match(const char *text, int width) {
     char err[256];
+    if (st_is_stat(text)) {
+        if (nslines >= ST_MAXLINES) { fprintf(stderr, "too many stat lines (max %d)\n", ST_MAXLINES); return -1; }
+        if (sline_parse(text, width, &slines[nslines], err, sizeof err)) { fprintf(stderr, "%s\n", err); return -1; }
+        int r = slines[nslines].rec_term >= 0 ? slines[nslines].t[slines[nslines].rec_term].rec : 0;
+        atomic_store(&g_rbest[nslines], r == 2 ? ST_NONE_MIN : ST_NONE_MAX);
+        nslines++;
+        return 0;
+    }
     if (nmpats >= MAX_PAT) { fprintf(stderr, "too many -m patterns (max %d)\n", MAX_PAT); return -1; }
     if (mpat_parse(text, width, &mpats[nmpats], err, sizeof err)) { fprintf(stderr, "%s\n", err); return -1; }
     nmpats++;
     return 0;
 }
+
+static int parse_best(const char *idx, const char *val) {
+    int i = atoi(idx);
+    if (i < 0 || i >= nslines || slines[i].rec_term < 0) { fprintf(stderr, "bad --best %s %s\n", idx, val); return -1; }
+    atomic_store(&g_rbest[i], atoi(val));
+    return 0;
+}
+
+/* All stat lines on a digest (32 bytes Mojang / 8 bytes NameMC). r->thr: first threshold line that holds;
+ * the record lines in r that beat g_rbest are raised to their value (compare-and-swap, so concurrent threads
+ * report strictly increasing records) and kept. Returns the number of records. */
+static int stat_check(const uint8_t *dg, stat_res_t *r) {
+    int snap[ST_MAXLINES];
+    for (int i = 0; i < nslines; i++) snap[i] = atomic_load(&g_rbest[i]);
+    stat_find(slines, nslines, dg, snap, r);
+    int k = 0;
+    for (int j = 0; j < r->nrec; j++) {
+        int line = r->rline[j], v = r->rval[j], rec = slines[line].t[slines[line].rec_term].rec, cur = snap[line], won = 0;
+        while (st_beats(rec, v, cur)) {
+            if (atomic_compare_exchange_weak(&g_rbest[line], &cur, v)) { won = 1; break; }
+        }
+        if (won) { r->rline[k] = line; r->rval[k++] = v; }
+    }
+    r->nrec = k;
+    return k;
+}
+
+static void record_why(char *buf, size_t cap, int line, int v) {
+    snprintf(buf, cap, "record:%s=%d", slines[line].text, v);
+}
+#define WHYBUF (ST_TEXT + 48)
 
 /* Leading zero nibbles of a 32-byte digest, at most 63: the trimmed id of an all-zero hash is "0". */
 static inline int digest_zero_nibbles(const uint8_t dg[32]) {

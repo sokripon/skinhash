@@ -16,8 +16,10 @@ built with build.ps1) and verify every hit. See README.md and docs/how-it-works.
 """
 import argparse
 import hashlib
+import json
 import os
 import re
+import shutil
 import struct
 import subprocess
 import sys
@@ -210,6 +212,8 @@ INTERRUPT_CODES = {0xC000013A, -2, 130}
 
 def stopped(msg="stopped (Ctrl+C)"):
     print(f"\n{msg}", flush=True)
+    if RECORDS:
+        RECORDS.summary()
     sys.exit(130)
 
 
@@ -243,6 +247,8 @@ def run_finder(cmd, rgba, on_hit=None, verifier=None):
     If on_hit(why, path) returns True the finder is stopped; the rest of its output is
     still verified and STOPPED_BY_US is returned."""
     global LAST_ROLLOVER, LAST_RATE
+    if RECORDS:   # start values of the record lines: the best so far (also after a rollover or a CPU fallback)
+        cmd = strip_best(cmd) + RECORDS.best_args()
     # stderr (progress lines) is merged in so it can be reformatted
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     asked_stop = False
@@ -269,12 +275,24 @@ def run_finder(cmd, rgba, on_hit=None, verifier=None):
                     LAST_ROLLOVER = None
             if line.startswith("HIT "):
                 f = line.rsplit("file=", 1)[1].strip()
+                if RECORDS:
+                    RECORDS.sweep(f)
                 ok, msg = (verifier or verify)(rgba, f)
                 print(f"  verify: {'OK' if ok else 'FAIL'} {msg}", flush=True)
+                if line.split()[1].startswith("record:") and RECORDS:
+                    if ok:
+                        RECORDS.hit(line)
+                    else:
+                        RECORDS.drop(f)
+                    continue
+                if ok and RECORDS:
+                    RECORDS.normal.add(f)
                 if ok and on_hit and on_hit(line.split()[1], f) and not asked_stop:
                     asked_stop = True
                     proc.terminate()
         rc = proc.wait()
+        if RECORDS:
+            RECORDS.sweep()
     except KeyboardInterrupt:
         proc.terminate()
         proc.wait()
@@ -286,11 +304,27 @@ def run_finder(cmd, rgba, on_hit=None, verifier=None):
     return rc
 
 
+def strip_best(cmd):
+    """cmd without its '--best IDX VALUE' triplets."""
+    out, i = [], 0
+    while i < len(cmd):
+        if cmd[i] == "--best" and i + 2 < len(cmd):
+            i += 3
+        else:
+            out.append(cmd[i])
+            i += 1
+    return out
+
+
 def target_args(targets):
-    out = []
+    out, order = [], []
     for t in targets:
         kind, val = t.split(":", 1)
-        out += [{"prefix": "-p", "suffix": "-s", "zeros": "-z", "contains": "-c", "match": "-m"}[kind], val]
+        out += [{"prefix": "-p", "suffix": "-s", "zeros": "-z", "contains": "-c", "match": "-m", "record": "-m"}[kind], val]
+        if kind == "record" or (kind == "match" and pt.is_stat(val)):
+            order.append(val)
+    if RECORDS:
+        RECORDS.order = order
     return out
 
 
@@ -421,9 +455,14 @@ def reserved_change(base_rgba, rgba):
     return None
 
 
+def name_id(path):
+    """The id in a result's file name: ID.png, or TAG-VALUE-ID.png for a record skin (records/)."""
+    return os.path.splitext(os.path.basename(path))[0].rsplit("-", 1)[-1]
+
+
 def verify(base_rgba, found_path):
     data = open(found_path, "rb").read()
-    want = os.path.splitext(os.path.basename(found_path))[0]
+    want = name_id(found_path)
     if texture_id(data) != want:
         return False, "file hash does not match its name"
     rgba = load_rgba(found_path)
@@ -492,7 +531,7 @@ def verify_namemc(base_rgba, found_path, nk=NAMEMC_KNOBS, want=None):
     """FOUND hashes to its name (or to WANT) under the NameMC formula, differs from BASE only in nk knob
     pixels (alpha 0 -> 1 on overlay/unused pixels) and the watermark (RGB under alpha 0 on unused pixels)."""
     data = open(found_path, "rb").read()
-    want = want or os.path.splitext(os.path.basename(found_path))[0]
+    want = want or name_id(found_path)
     rgba = load_rgba(found_path)
     if namemc_id(rgba) != want:
         return False, "NameMC id of the file does not match its name"
@@ -566,7 +605,7 @@ def target_match(t, shown, full):
         return shown.endswith(val)
     if kind == "contains":
         return val in shown
-    if kind == "match":
+    if kind in ("match", "record"):
         return parsed_pattern(val, len(full)).match(full)
     return len(full) - len(full.lstrip("0")) >= int(val)
 
@@ -595,10 +634,18 @@ def report_odds(targets, width, rate, label):
         return
     rows = []
     for t in targets:
-        p = pt.target_probability(t, width)
+        best = RECORDS.best(t[7:]) if RECORDS and t.startswith("record:") else None
+        p = pt.target_probability(t, width, best)
         rows.append((t, p))
         warn = ""
-        if t.startswith("match:"):
+        if t.startswith("record:"):
+            print(f"target {t}: record line, {'no best yet (the first id is a record)' if best is None else f'best so far {best}, a new record'}"
+                  f"{'' if best is None else f': {pt.fmt_odds(p)}, {pt.fmt_eta(p, rate)} at {label}'}", flush=True)
+            continue
+        if t.startswith("match:") and pt.is_stat(t[6:]):
+            if p > pt.WARN_ODDS:
+                warn = "  warning: very common; hits may come faster than they can be re-checked and saved"
+        elif t.startswith("match:"):
             f = parsed_pattern(t[6:], width).prefilter()
             if p > pt.WARN_ODDS:
                 warn = "  warning: very common; hits may come faster than they can be re-checked and saved"
@@ -627,7 +674,7 @@ def finder_extra(threads, seed, bench=False):
 def search_args(targets, count, every, extra, bench=False):
     """The finder's own flags for the parsed options. --every-target stops by itself, so no -n."""
     a = target_args(targets)
-    if not every and not bench:
+    if not every and not bench and split_targets(targets)[0]:
         a += ["-n", str(count)]
     return a + extra
 
@@ -635,8 +682,11 @@ def search_args(targets, count, every, extra, bench=False):
 def run_targets(launch, targets, extra, outdir, url_prefix):
     """--every-target: run until every target has a verified hit. Restarts without the targets
     already found. Returns {target: path of its first hit}."""
-    remaining = list(targets)
+    remaining, recs = split_targets(targets)
     found = {}
+    if not remaining:   # record lines only: run until Ctrl+C
+        launch(target_args(recs) + extra, None)
+        return found
     while remaining:
         print(f"every-target: still looking for {', '.join(remaining)}", flush=True)
         newly, keep, firsts = [], set(), {}
@@ -649,7 +699,7 @@ def run_targets(launch, targets, extra, outdir, url_prefix):
                 keep.add(os.path.basename(path))
                 firsts[t] = path
             return bool(newly)
-        r = launch(target_args(remaining) + extra, on_hit)
+        r = launch(target_args(remaining + recs) + extra, on_hit)
         for t in newly:
             remaining.remove(t)
             found[t] = firsts[t]
@@ -667,6 +717,120 @@ def run_targets(launch, targets, extra, outdir, url_prefix):
         for t, p in found.items():
             print(f"  {t:<20} {url_prefix}{os.path.splitext(os.path.basename(p))[0]}", flush=True)
     return found
+
+
+# ---- records: stat lines with {max} / {min} ------------------------------------------------------------------
+class RecordStore:
+    """Best value of every record line of one search, kept in OUT/records.json (so a rerun continues) and the
+    skins that set the records in OUT/records/. Keys: mojang / namemc, then the normalised line text."""
+
+    def __init__(self, outdir, width, texts, reset=False):
+        self.dir, self.width = outdir, width
+        self.group = "mojang" if width == 64 else "namemc"
+        self.path = os.path.join(outdir, "records.json")
+        self.lines = {t: pt.parse_line(t, width) for t in texts}
+        self.order = []                 # stat line order of the finder command line (set by target_args)
+        self.normal = set()             # files reported as ordinary hits (never deleted as record files)
+        self.garbage = set()            # record files to delete once the finder names another file
+        self.data = {}
+        try:
+            self.data = json.load(open(self.path, encoding="utf-8"))
+        except (OSError, ValueError):
+            self.data = {}
+        if reset:
+            self.data.pop(self.group, None)
+            self.save()
+        self.mine = self.data.setdefault(self.group, {})
+
+    def save(self):
+        os.makedirs(self.dir, exist_ok=True)
+        tmp = self.path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(self.data, f, indent=1)
+        os.replace(tmp, self.path)
+
+    def best(self, text):
+        e = self.mine.get(text)
+        return e["value"] if e else None
+
+    def best_args(self):
+        """--best IDX VALUE for the record lines that have a best (IDX: position among the finder's stat lines)."""
+        out = []
+        for i, text in enumerate(self.order):
+            b = self.best(text) if text in self.lines else None
+            if b is not None:
+                out += ["--best", str(i), str(b)]
+        return out
+
+    def hit(self, line):
+        """A verified 'HIT record:TEXT=VALUE ...' line of a finder. Returns True if it was a new record."""
+        why = line.split()[1][len("record:"):]
+        text, _, value = why.rpartition("=")
+        kv = dict(x.split("=", 1) for x in line.split()[2:] if "=" in x)
+        path, idd = line.rsplit("file=", 1)[1].strip(), kv.get("id", "")
+        pl = self.lines.get(text)
+        if pl is None or not value.lstrip("-").isdigit():
+            return False
+        value = int(value)
+        full = kv.get("sha", "") if self.width == 64 else idd
+        ok, v = pl.evaluate(full)
+        if not ok or v != value:
+            print(f"  record check FAIL: {text} = {value} claimed, the reference says {v if ok else 'does not hold'}", flush=True)
+            self.drop(path)
+            return False
+        old = self.best(text)
+        if old is not None and not pl.beats(value, old):
+            self.drop(path)
+            return False
+        os.makedirs(os.path.join(self.dir, "records"), exist_ok=True)
+        dest = os.path.join(self.dir, "records", f"{pl.tag()}-{value}-{os.path.basename(path)}")
+        shutil.copyfile(path, dest)
+        self.drop(path)
+        self.mine[text] = {"value": value, "id": idd, "file": os.path.relpath(dest, self.dir)}
+        self.save()
+        print(f"RECORD {text}: {value} (was {'none' if old is None else old}) {idd} file={dest}", flush=True)
+        return True
+
+    def drop(self, path):
+        """The finder's own copy of a record skin goes away, but only once the finder has moved on to another file:
+        several HIT lines (a target and records) can name the same file."""
+        if path not in self.normal:
+            self.garbage.add(path)
+
+    def sweep(self, keep=None):
+        for path in list(self.garbage):
+            if path != keep and path not in self.normal:
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+                self.garbage.discard(path)
+
+    def summary(self):
+        rows = [(t, self.mine[t]) for t in self.lines if t in self.mine]
+        if rows:
+            print("records:", flush=True)
+            for t, e in rows:
+                print(f"  {t:<24} {e['value']:>4}  {e['id']}  {e['file']}", flush=True)
+
+
+RECORDS = None     # the RecordStore of the running search
+RESET_RECORDS = False
+
+
+def split_targets(targets):
+    """(threshold targets, record targets)."""
+    return ([t for t in targets if not t.startswith("record:")], [t for t in targets if t.startswith("record:")])
+
+
+def start_records(targets, outdir, width):
+    """Open the record store of this search (None without record lines)."""
+    global RECORDS
+    recs = [t[7:] for t in targets if t.startswith("record:")]
+    RECORDS = RecordStore(outdir, width, recs, RESET_RECORDS) if recs else None
+    if RECORDS and RECORDS.mine and not RESET_RECORDS:
+        print("records so far (continuing; --reset-records starts over): "
+              + ", ".join(f"{t} = {e['value']}" for t, e in RECORDS.mine.items() if t in RECORDS.lines), flush=True)
 
 
 # ---- Mojang search -----------------------------------------------------------------------------
@@ -689,6 +853,7 @@ def mojang_search(path, targets, count=1, every=False, engine="auto", no_generic
     with open(rawp, "wb") as f:
         f.write(raw_scanlines(rgba))
     print(f"original id {texture_id(mojang_png(orig))}; knob pixels {used}", flush=True)
+    start_records(targets, outdir, 64)
 
     kset = set(kp)  # reserved pixels are never in it
     bad = [p for p in tail_px if p not in kset]
@@ -769,6 +934,7 @@ def namemc_search(path, targets, count=1, every=False, engine="auto", unused_onl
     kopt = ",".join(f"{x},{y}" for x, y in knobs)
     print(f"original NameMC id {namemc_id(orig)}; knob pixels {knobs} (alpha 1); "
           f"{len(elig)} eligible", flush=True)
+    start_records(targets, outdir, 16)
     cpu, gpuexe = exe("namemcfinder"), exe("namemcgpu")
     if not os.path.exists(cpu):
         sys.exit("namemcfinder not found (build it with build.ps1)")
@@ -1297,10 +1463,15 @@ def targets_from(prefix, suffix, zeros, contains=None, match=None, width=64, par
             if parser:
                 parser.error(msg)
             raise
-        t += [f"match:{p.text}" for p in pats]
+        hexp = [p for p in pats if isinstance(p, pt.Pattern)]
+        for p in pats:
+            if isinstance(p, pt.StatLine):
+                t.append(f"{'record' if p.record else 'match'}:{p.finder_text()}")
+            else:
+                t.append(f"match:{p.text}")
         # the GPU tables: sliding windows share the contains table, anchored masks (NameMC: with -p/-s)
-        nslide = len(contains or []) + sum(p.prefilter()["kind"] == "sliding" for p in pats)
-        nanch = sum(p.prefilter()["kind"] == "anchored" for p in pats) + (len(prefix or []) + len(suffix or []) if width == 16 else 0)
+        nslide = len(contains or []) + sum(p.prefilter()["kind"] == "sliding" for p in hexp)
+        nanch = sum(p.prefilter()["kind"] == "anchored" for p in hexp) + (len(prefix or []) + len(suffix or []) if width == 16 else 0)
         err = None
         if nslide > pt.MAX_SLIDING:
             err = f"{nslide} unanchored patterns (with --contains); the GPU takes at most {pt.MAX_SLIDING}"
@@ -1330,7 +1501,13 @@ def default_out(args, suffix=""):
     return os.path.join(HERE, "found", os.path.splitext(os.path.basename(args.skin))[0] + suffix)
 
 
+def set_reset(args):
+    global RESET_RECORDS
+    RESET_RECORDS = bool(getattr(args, "reset_records", False))
+
+
 def cmd_mojang(args):
+    set_reset(args)
     targets = targets_from(args.prefix, args.suffix, args.zeros, args.contains, args.match, 64, args.parser)
     check_search_options(args.parser, args, bool(targets))
     args.skin = skin_path(args.skin)
@@ -1341,6 +1518,7 @@ def cmd_mojang(args):
 
 
 def cmd_namemc(args):
+    set_reset(args)
     targets = targets_from(args.prefix, args.suffix, args.zeros, args.contains, args.match, 16, args.parser)
     check_search_options(args.parser, args, bool(targets))
     args.skin = skin_path(args.skin)
@@ -1357,12 +1535,17 @@ def cmd_collide(args):
 
 
 def cmd_both(args):
+    set_reset(args)
     nm_t = targets_from(args.namemc_prefix, args.namemc_suffix, args.namemc_zeros, args.namemc_contains,
                         args.namemc_match, 16, args.parser, "--namemc-match")
     mj_t = targets_from(args.mojang_prefix, args.mojang_suffix, args.mojang_zeros, args.mojang_contains,
                         args.mojang_match, 64, args.parser, "--mojang-match")
     check_search_options(args.parser, args, bool(nm_t or mj_t),
                          "use --namemc-prefix/-suffix/-contains/-match/-zeros and/or --mojang-prefix/-suffix/-contains/-match/-zeros")
+    for g, ts in (("--namemc-match", nm_t), ("--mojang-match", mj_t)):
+        if ts and not split_targets(ts)[0]:
+            args.parser.error(f"{g}: a group of only record lines ({{max}}/{{min}}) never ends; add a normal target "
+                              "(its first hit ends the phase) or use the mojang / namemc command")
     args.skin = skin_path(args.skin)
     outdir = default_out(args, "_both")
     orig = load_rgba(args.skin)
@@ -1503,7 +1686,10 @@ def add_targets(p, kind):
                    help=("hex pattern: ^ start, $ end, ? any, ?d 0-9, ?l a-f, [0-3] class, {n} repeat, * gap. "
                          + ("^ is the start of the full 64-digit hash (^0{12} = 12 leading zeros); without ^ the "
                             "pattern must lie in the link id. " if kind == "mojang" else "Matched on the 16-digit id. ")
-                         + "Repeatable; also a comma list (-m '^cafe,dead$') or @FILE (one pattern per line, # comments)."))
+                         + "Also stat lines: #0{24,} count, ##{,9} different digits, ~{25} palindrome, +{12} / -{12} staircase, "
+                           "(?)\\1{11} run, {max}/{min} record mode, A & B (see the README). "
+                         + "Repeatable; also a comma list (-m '^cafe,dead$') or @FILE (one pattern per line, # comments). "
+                           "Start a line with '-' as --match=-{12}."))
 
 
 def add_stopping(p, both=False):
@@ -1548,9 +1734,12 @@ def add_pixels(p, kind):
     g.add_argument("--no-watermark", action="store_true", help="do not add the invisible skinhash watermark")
 
 
-def add_output(p, default):
+def add_output(p, default, records=True):
     g = p.add_argument_group("Output")
     g.add_argument("-o", "--out", metavar="DIR", help=f"output directory (default {default})")
+    if records:
+        g.add_argument("--reset-records", action="store_true",
+                       help="forget the best values of record lines ({max}/{min}) saved in OUT/records.json and start over")
 
 
 def add_advanced(p):
@@ -1688,7 +1877,7 @@ def build_parser():
     g.add_argument("-n", "--count", metavar="N", type=int_range(1), default=1, help="stop after N hits (list mode; default 1)")
     g.add_argument("--bench", action="store_true", help="10 s benchmark of the list mode, saves nothing")
     g.add_argument("--no-watermark", action="store_true", help="do not add the invisible skinhash watermark")
-    add_output(p, "found/<skin>_collide/")
+    add_output(p, "found/<skin>_collide/", False)
     g = p.add_argument_group("Advanced")
     g.add_argument("--seed", metavar="N", type=int_range(0), help="start seed (default: random)")
     p.set_defaults(func=cmd_collide)

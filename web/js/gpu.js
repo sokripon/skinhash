@@ -1,5 +1,6 @@
 // WebGPU runner: device setup, correctness gate, pipelined search loop.
-import { deriveJob, buildConsts, genShader, MAXHITS, MAXPAT, MAXCONT, MAXANCH, CB, AE, PT_WORDS, HITS_WORDS, NTEST_STRIDE } from "./wgsl.js";
+import { deriveJob, buildConsts, genShader, MAXHITS, MAXPAT, MAXCONT, MAXANCH, CB, AE, SE, PT_WORDS, HITS_WORDS, NTEST_STRIDE } from "./wgsl.js";
+import { MAXSTAT, recordInit } from "./wgslstat.js";
 import { deriveFast, buildFastConsts, genFastShader } from "./wgslfast.js";
 import { RIN, NPERM, permCount, outerDigits } from "./job.js";
 
@@ -50,9 +51,10 @@ async function compilePipelines(d, code) {
 
 export class GpuJob {
   /** contains: build the sliding check; anchored: [{key, mw, vw}] pattern prefilters baked into the shader */
-  constructor(device, job, { wg = 256, kernel = "auto", contains = false, anchored = [] } = {}) {
+  /** stat: {lines: [StatLine]} (threshold and record lines, baked into the shader) or null */
+  constructor(device, job, { wg = 256, kernel = "auto", contains = false, anchored = [], stat = null } = {}) {
     if (anchored.length > MAXANCH) throw new Error(`at most ${MAXANCH} anchored patterns`);
-    this.device = device; this.job = job; this.wg = wg;
+    this.device = device; this.job = job; this.wg = wg; this.stat = stat;
     this.D = deriveJob(job);
     this.kernel = "generic"; this.whyGeneric = kernel === "generic" ? "forced" : "";
     if (kernel !== "generic") {
@@ -61,13 +63,13 @@ export class GpuJob {
         this.F = F; this.kernel = "fast";
         const { buf, off } = buildFastConsts(this.D, F);
         this.consts = buf;
-        this.wgsl = genFastShader(job, this.D, F, off, wg, contains, anchored);
+        this.wgsl = genFastShader(job, this.D, F, off, wg, contains, anchored, stat);
       } else this.whyGeneric = F.why;
     }
     if (this.kernel === "generic") {
       const { off, buf } = buildConsts(this.D, job.nblk);
       this.consts = buf;
-      this.wgsl = genShader(this.D, off, wg, job.tests.length, contains, anchored);
+      this.wgsl = genShader(this.D, off, wg, job.tests.length, contains, anchored, stat);
     }
     this.nTests = job.tests.length;
     this.pats = []; this.zeros = 0; this.cont = []; this.hasContains = contains; this.anchored = anchored; this.anchKeys = [];
@@ -82,7 +84,9 @@ export class GpuJob {
     this.kbuf = mk(this.consts.byteLength, U.STORAGE | U.COPY_DST);
     d.queue.writeBuffer(this.kbuf, 0, this.consts);
     this.ptbuf = mk(PT_WORDS * 4, U.STORAGE | U.COPY_DST);
-    this.setTargets(this.pats, this.zeros, this.cont, this.anchKeys);
+    // the best values of record lines (binding 5 exists in the shader only when a record line is used)
+    if (this.stat?.lines.some((l) => l.record)) { this.rbuf = mk(MAXSTAT * 4, U.STORAGE | U.COPY_DST); this.setRecordBests(this.recBests || []); }
+    this.setTargets(this.pats, this.zeros, this.cont, this.anchKeys, this.statKeys || []);
     this.slots = [0, 1].map(() => {
       const dp = mk(20 * 4, U.STORAGE | U.COPY_DST);
       const hits = mk(HITS_WORDS * 4, U.STORAGE | U.COPY_SRC | U.COPY_DST);
@@ -90,23 +94,37 @@ export class GpuJob {
       const bind = d.createBindGroup({ layout: this.search.getBindGroupLayout(0), entries: [
         { binding: 0, resource: { buffer: this.kbuf } }, { binding: 1, resource: { buffer: this.ptbuf } },
         { binding: 2, resource: { buffer: dp } }, { binding: 3, resource: { buffer: hits } },
-        ...(this.kernel === "fast" ? [{ binding: 4, resource: { buffer: this.dummy } }] : [])] });
+        ...(this.kernel === "fast" ? [{ binding: 4, resource: { buffer: this.dummy } }] : []),
+        ...(this.rbuf ? [{ binding: 5, resource: { buffer: this.rbuf } }] : [])] });
       return { dp, hits, staging, bind };
     });
   }
 
   /** pats: [{vh, vl, mh, ml, suffix}], cont: [{p1, m1, p2, m2, lim, lo}] (only used if the kernel was built with
    *  contains), anchKeys: target keys of the anchored patterns that are still wanted (the others are switched off) */
-  setTargets(pats, zeros, cont = [], anchKeys = []) {
+  setTargets(pats, zeros, cont = [], anchKeys = [], statKeys = []) {
     if (cont.length && !this.hasContains) throw new Error("this kernel was built without contains support");
-    this.pats = pats; this.zeros = zeros; this.cont = cont; this.anchKeys = anchKeys;
+    this.pats = pats; this.zeros = zeros; this.cont = cont; this.anchKeys = anchKeys; this.statKeys = statKeys;
     const a = new Uint32Array(PT_WORDS);
     a[0] = Math.min(pats.length, MAXPAT); a[1] = zeros;
     pats.slice(0, MAXPAT).forEach((p, i) => a.set([p.vh, p.vl, p.mh, p.ml, p.suffix ? 1 : 0], 2 + 5 * i));
     a[CB] = Math.min(cont.length, MAXCONT);
     cont.slice(0, MAXCONT).forEach((c, i) => a.set([c.p1, c.m1, c.p2, c.m2, c.lim, c.lo ?? 1 << 16], CB + 1 + 6 * i));
     this.anchored.forEach((x, i) => { a[AE + i] = anchKeys.includes(x.key) ? 1 : 0; });
+    if (this.stat) this.stat.lines.forEach((l, i) => { a[SE + i] = !l.record && statKeys.includes(`stat:${l.text}`) ? 1 : 0; });
     this.device.queue.writeBuffer(this.ptbuf, 0, a);
+  }
+
+  /** Best value of every record line (null: none yet), in line order. The device keeps its own copy while searching; the
+   *  page raises it here after its CPU check of a hit. */
+  setRecordBests(bests) {
+    this.recBests = bests;
+    if (this.rbuf) this.device.queue.writeBuffer(this.rbuf, 0, recordInit(this.stat.lines, bests));
+  }
+
+  /** Raise one record line's best on the device (the page calls it for lines the GPU does not compute exactly). */
+  raiseRecord(i, v) {
+    if (this.rbuf) this.device.queue.writeBuffer(this.rbuf, 4 * i, new Int32Array([v]));
   }
 
   /** The GPU must reproduce the CPU test vectors exactly. Returns {ok, n, bad, detail}. */
@@ -128,7 +146,7 @@ export class GpuJob {
     d.queue.writeBuffer(bdp, 0, tdp);
     const bind = d.createBindGroup({ layout: this.test.getBindGroupLayout(0), entries: [
       { binding: 0, resource: { buffer: this.kbuf } }, { binding: 2, resource: { buffer: bdp } }, { binding: 4, resource: { buffer: bout } },
-      ...(this.kernel === "fast" ? [{ binding: 1, resource: { buffer: this.ptbuf } }, { binding: 3, resource: { buffer: this.dummy } }] : [])] });
+      ...(this.kernel === "fast" ? [{ binding: 1, resource: { buffer: this.ptbuf } }, { binding: 3, resource: { buffer: this.dummy } }, ...(this.rbuf ? [{ binding: 5, resource: { buffer: this.rbuf } }] : [])] : [])] });
     const enc = d.createCommandEncoder();
     const pass = enc.beginComputePass();
     pass.setPipeline(this.test); pass.setBindGroup(0, bind); pass.dispatchWorkgroups(Math.ceil(nt / 64));
@@ -213,7 +231,7 @@ export class GpuJob {
   }
 
   destroy() {
-    for (const b of [this.kbuf, this.ptbuf, this.dummy, ...(this.slots || []).flatMap((s) => [s.dp, s.hits, s.staging])]) b?.destroy();
+    for (const b of [this.kbuf, this.ptbuf, this.rbuf, this.dummy, ...(this.slots || []).flatMap((s) => [s.dp, s.hits, s.staging])]) b?.destroy();
   }
 }
 

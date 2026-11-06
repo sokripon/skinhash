@@ -2,6 +2,7 @@
 // tables go into one read-only storage buffer. u32 only: 64-bit values are split.
 import { K256, crcRegister, CRC_TABLE } from "./hash.js";
 import { RIN, NPERM } from "./job.js";
+import { MAXSTAT, statLib, statCode, zlExpr } from "./wgslstat.js";
 
 export const MAXHITS = 1024;
 export const MAXPAT = 32;
@@ -9,7 +10,8 @@ export const MAXCONT = 32;
 export const MAXANCH = 32;
 export const CB = 2 + 5 * MAXPAT;                 // Mojang kernels: contains table in PT after the prefix/suffix patterns
 export const AE = CB + 1 + 6 * MAXCONT;           // [count, then p1 m1 p2 m2 lim lo per sliding entry], then
-export const PT_WORDS = AE + MAXANCH;             // one enable word per anchored pattern baked into the shader
+export const SE = AE + MAXANCH;                   // one enable word per anchored pattern baked into the shader
+export const PT_WORDS = SE + MAXSTAT;             // then one per stat line (threshold lines can be switched off)
 export const HITS_WORDS = 2 + 2 * MAXHITS;
 export const NTEST_STRIDE = 20;
 
@@ -148,7 +150,7 @@ export function anchoredCode(anch, words) {
 
 /** Target matching and hit recording for one candidate; expects s0..s7 (digest words), gid, tt, zbest in scope.
  *  contains: generate the sliding check (contains targets, sliding pattern prefilters); anch: anchored prefilters. */
-export function hitCode(contains = false, anch = []) {
+export function hitCode(contains = false, anch = [], stat = null) {
   return `let zn = select(select(16u, 8u + (countLeadingZeros(s1) >> 2u), s1 != 0u), countLeadingZeros(s0) >> 2u, s0 != 0u);
     zbest = max(zbest, zn);
     var hit = PT[1] != 0u && zn >= PT[1];
@@ -169,7 +171,7 @@ export function hitCode(contains = false, anch = []) {
     }
     ${anch.length ? "if (!hit) {\n" + anchoredCode(anch, ["s0", "s1", "s2", "s3", "s4", "s5", "s6", "s7"]) + "    }" : ""}
     ${contains ? "if (!hit) {\n" + containsCode({ words: ["s0", "s1", "s2", "s3", "s4", "s5", "s6", "s7"], cb: CB, zl: "zn" }) + "}" : ""}
-    if (hit) {
+${stat ? "    " + statCode(stat.lines, ["s0", "s1", "s2", "s3", "s4", "s5", "s6", "s7"], { zl: zlExpr(["s0", "s1", "s2", "s3", "s4", "s5", "s6", "s7"]), SE }) : ""}    if (hit) {
       let pos = atomicAdd(&HITS[0], 1u);
       if (pos < ${MAXHITS}u) { atomicStore(&HITS[2u + 2u * pos], gid); atomicStore(&HITS[3u + 2u * pos], tt); }
     }`;
@@ -216,7 +218,7 @@ ${Hh} = t1 + (${ror(A, 2)} ^ ${ror(A, 13)} ^ ${ror(A, 22)}) + ((${A} & ${B}) | (
   return c;
 }
 
-function runOuter(name, test, D, off, WGs, contains = false, anch = []) {
+function runOuter(name, test, D, off, WGs, contains = false, anch = [], stat = null) {
   const P = D.P, m = P.m, mo = m - RIN, nblk = P.nblk, KW = P.KW;
   const maskm = ((1 << m) - 1) >>> 0;
   let s = `fn ${name}(doff: u32, gid: u32, tlo: u32, thi: u32, tid: u32) {
@@ -290,7 +292,7 @@ function runOuter(name, test, D, off, WGs, contains = false, anch = []) {
 `;
     return s;
   }
-  s += `    ${hitCode(contains, anch)}
+  s += `    ${hitCode(contains, anch, stat)}
   }
   if (zbest > 0u && zbest > atomicLoad(&HITS[1])) { atomicMax(&HITS[1], zbest); }
 }
@@ -298,7 +300,7 @@ function runOuter(name, test, D, off, WGs, contains = false, anch = []) {
   return s;
 }
 
-export function genShader(D, off, WG = 256, nTests = 24, contains = false, anch = []) {
+export function genShader(D, off, WG = 256, nTests = 24, contains = false, anch = [], stat = null) {
   const TW = 64;
   return `
 @group(0) @binding(0) var<storage, read> KT: array<u32>;
@@ -318,13 +320,13 @@ fn bswap(x: u32) -> u32 {
 fn shl2(a: u32, b: u32, sh: u32) -> u32 {
   return select((a << sh) | (b >> (32u - sh)), a, sh == 0u);
 }
-fn load_shared(li: u32, nthreads: u32) {
+${stat ? statLib(8) : ""}fn load_shared(li: u32, nthreads: u32) {
   for (var i = li; i < 256u; i += nthreads) { s_crc[i] = KT[${off.CRC}u + i]; }
   for (var i = li; i < 1536u; i += nthreads) { s_gt[i] = KT[${off.GT}u + i]; }
   for (var i = li; i < 64u; i += nthreads) { s_tab[i] = KT[${off.TAB}u + i]; s_val[i] = KT[${off.VAL}u + i]; }
   workgroupBarrier();
 }
-${runOuter("run_search", false, D, off, WG, contains, anch).replaceAll("GT[", "s_gt[")}
+${runOuter("run_search", false, D, off, WG, contains, anch, stat).replaceAll("GT[", "s_gt[")}
 ${runOuter("run_test", true, D, off, WG).replaceAll("GT[", "s_gt[")}
 
 @compute @workgroup_size(${WG})

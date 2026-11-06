@@ -75,7 +75,7 @@ Options shared by the search commands (`mojang`, `namemc`, `both`):
 | `-p, --prefix HEX` | id starts with HEX. Repeatable. |
 | `-s, --suffix HEX` | id ends with HEX. Repeatable. |
 | `-c, --contains HEX` | HEX occurs anywhere in the id (1-16 hex digits, may start with 0). Repeatable. |
-| `-m, --match PATTERN` | hex pattern (see "Patterns"). Repeatable; also a comma list or `@FILE`. |
+| `-m, --match PATTERN` | hex pattern (see "Patterns") or stat line (see "Stat lines and records"). Repeatable; also a comma list or `@FILE`. |
 | `-z, --zeros N` | at least N leading zero digits. Repeatable. |
 | `-n, --count N` | stop after N verified hits (default 1) |
 | `--every-target` | run until every target has a hit; the first hit per target is kept, `-n` is ignored |
@@ -147,6 +147,63 @@ is more selective. A class becomes the bits all its digits share (`[0-7]` is exa
 about 1% per anchored pattern and about 12% per unanchored pattern (the cost of a `--contains` pattern); NameMC
 about 2-3% each; details in `docs/optimizations.md`. Limits:
 64 patterns per group, at most 32 of them unanchored (together with `--contains`).
+
+### Stat lines and records
+
+A pattern line can also ask about the *shape* of the id: how many zeros it has, its longest staircase, whether it
+reads the same backwards. Use them for fun records (most zeros, fewest letters, longest palindrome ...). They are
+written in the same places as other patterns (`-m`, comma lists, `@FILE`, the Patterns box of the web page), with free
+spacing and any case.
+
+| Line | Meaning |
+|---|---|
+| `#0{24,}` | count: at least 24 `0` digits. The range is `{n}` exactly, `{n,}` at least, `{,n}` at most, `{n,m}` |
+| `#?l{,0}` / `#?l{50,}` | letters a-f: at most 0 (no letters at all) / at least 50 |
+| `#[0-3]{20,}` | the count works for any digit, `?d`, `?l`, or class |
+| `#(dead\|beef\|cafe){3,}` | occurrences of the words (1-8 hex digits, overlaps count), in all of them together |
+| `#@words.txt{4,}` | the same, words from a file (one per line, `#` comments; path relative to the pattern file, or to the current directory on the command line) |
+| `##{,9}` | the number of different digits used: at most 9 (of 16) |
+| `(?)\1{11}` | one digit 12 times in a row. `(?{p})\1{n}` or `(??)\1{n}`: a block of p digits (1-8) repeated, p*(n+1) digits long |
+| `(??)\1{6}` | zigzag: a pair repeated, `7c7c7c7c7c7c7c` is 14 digits |
+| `+{12}` / `-{12}` | staircase up / down, 12 digits, each one more / one less than the one before (`f` does not wrap to `0`) |
+| `~{25}` | a palindrome of at least 25 digits (odd or even) |
+| `{max}` / `{min}` | record mode instead of a number, see below |
+| `A & B` | all terms must hold, e.g. `^dead & #0{10,}` |
+
+For a Mojang id the counts, `##` and the shapes look at the visible id, the link, so leading zeros are not part of
+them. `^` and `$` in a hex term still refer to the full 64-digit hash, as everywhere. For NameMC they look at the 16
+digits. On a shape `{n}` means "a run of n digits exists" (at least n).
+
+Records: `{max}` (or `{min}`) in place of the number turns the line into a record category. It is also allowed on a
+repeated single digit of a hex pattern: `^f{max}` (most leading f's), `0{max}` (longest run of zeros),
+`(?)\1{max}` (longest run of one digit), `~{max}`, `+{max}`, `(??)\1{max}` (longest zigzag), `#?l{max}` (most
+letters), `#?l{min}` (fewest letters), `##{min}` (fewest different digits). At most one `{max}`/`{min}` per line.
+
+```
+py skinhash.py mojang skins/me.png -m '#0{24,}'                      # normal target, counts for -n
+py skinhash.py mojang skins/me.png -m '~{max}' -m '##{min}'           # records, runs until Ctrl+C
+py skinhash.py mojang skins/me.png --match=-{12}                       # a line that starts with '-' needs --match=
+py skinhash.py mojang skins/me.png -m '^dead & #0{10,}' -m '+{9}' -m '(??)\1{6}'
+```
+
+- A line with numbers is a normal target: it counts for `-n` and `--every-target` and is reported as
+  `match:LINE`.
+- A record line reports **every improvement**: `RECORD ~{max}: 19 (was 18) <id> file=...`. The skin is saved under
+  `OUT/records/` as `TAG-VALUE-ID.png` (for example `pal-19-<id>.png`) and the best value is kept in
+  `OUT/records.json`, so a rerun continues where it stopped (`--reset-records` starts over). Record lines do not
+  count for `-n`; with only record lines the search runs until Ctrl+C, which prints the records. With `both`, a group
+  needs a normal target (its first hit ends the phase).
+- Odds and expected time are printed per line. For a record line they are the odds of beating the current best.
+  Counts, runs and staircases are exact; palindromes and word counts use an approximation (palindromes: a Poisson
+  estimate over all centres, good to a factor of ~1.3 for long ones).
+- The GPU computes the same values as the reference (SWAR code over the digest words) and the host re-checks every
+  candidate, then `skinhash.py` verifies the file. The CPU finders evaluate each hash on the host, much slower
+  (about 1/100 of the plain CPU rate). Word counts take words of 1-8 digits.
+- Limits per group: 32 lines, 6 terms per line, 96 terms, 64 words. Hex terms inside an `&` line are tested on the GPU
+  only through their `^`/`$` part; an unanchored hex term is left to the host.
+- Cost on the GPU (RTX 5060 Ti): a count, `##` or run line slows the Mojang search by about 20-30% (NameMC 3-8%), a
+  palindrome by about 33%, a word count by about 75%, eleven record lines together to a fifth. Searches without stat
+  lines are not slower. Table in `docs/optimizations.md`.
 
 Every hit is re-verified by `skinhash.py` (hash equals file name, Python zlib re-encodes the file identically,
 no visible pixel changed) and printed as `HIT <why> sha=<full hex> id=<id> counter=<n> file=<path>`.

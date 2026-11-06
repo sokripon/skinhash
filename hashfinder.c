@@ -148,7 +148,7 @@ static void *worker(void *arg) {
         uint64_t tp = trimmed_top64(hi, mid);
 
         const char *why = NULL;
-        char whybuf[200];
+        char whybuf[WHYBUF];
         for (int i = 0; i < npats; i++) {
             uint64_t v = pats[i].suffix ? lo : tp;
             if ((v & pats[i].mask) == pats[i].val) {
@@ -165,6 +165,11 @@ static void *worker(void *arg) {
             int k = mpat_find(mpats, nmpats, d);
             if (k >= 0) { snprintf(whybuf, sizeof whybuf, "match:%s", mpats[k].text); why = whybuf; }
         }
+        stat_res_t sr; int nrec = 0;
+        if (nslines) {
+            nrec = stat_check(d, &sr);
+            if (!why && sr.thr >= 0) { snprintf(whybuf, sizeof whybuf, "match:%s", slines[sr.thr].text); why = whybuf; }
+        }
         int zn = hi ? __builtin_clzll(hi) / 4 : 16;
         if (zn > best) {
             best = atomic_load(&g_best_zeros);
@@ -179,6 +184,11 @@ static void *worker(void *arg) {
             report(file, flen, d, ctr, why);
             long long h = atomic_fetch_add(&g_hits, 1) + 1;
             if (g_max_hits > 0 && h >= g_max_hits) atomic_store(&g_stop, 1);
+        }
+        for (int j = 0; j < nrec; j++) {
+            char rw[WHYBUF];
+            record_why(rw, sizeof rw, sr.rline[j], sr.rval[j]);
+            report(file, flen, d, ctr, rw);
         }
 
         ctr += (uint64_t)g_threads;
@@ -231,6 +241,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "-s") && v) { if (parse_pat(v, 1)) { fprintf(stderr, "bad -s %s\n", v); return 1; } i++; }
         else if (!strcmp(a, "-c") && v) { if (parse_contains(v)) { fprintf(stderr, "bad -c %s\n", v); return 1; } i++; }
         else if (!strcmp(a, "-m") && v) { if (parse_match(v, 64)) return 1; i++; }
+        else if (!strcmp(a, "--best") && i + 2 < argc) { if (parse_best(argv[i + 1], argv[i + 2])) return 1; i += 2; }
         else if (!strcmp(a, "-z") && v) { g_zeros = atoi(v); i++; }
         else if (!strcmp(a, "-t") && v) { g_threads = atoi(v); i++; }
         else if (!strcmp(a, "-S") && v) { g_seed = strtoull(v, NULL, 0); i++; }
@@ -249,9 +260,9 @@ int main(int argc, char **argv) {
         fprintf(stderr, "SHA-256 self-test failed\n"); return 2;
     }
     if (g_threads < 1) g_threads = 1;
-    fprintf(stderr, "threads=%d seed=%llu tail=%d bytes (of %d) sha=%s patterns=%d contains=%d match=%d zeros>=%d\n",
+    fprintf(stderr, "threads=%d seed=%llu tail=%d bytes (of %d) sha=%s patterns=%d contains=%d match=%d stat=%d zeros>=%d\n",
             g_threads, (unsigned long long)g_seed, RAW_LEN - g_split, RAW_LEN,
-            sha256_block == sha256_block_generic ? "generic" : "sha-ni", npats, ncpats, nmpats, g_zeros);
+            sha256_block == sha256_block_generic ? "generic" : "sha-ni", npats, ncpats, nmpats, nslines, g_zeros);
     fflush(stderr);
 
     pthread_t *th = calloc(g_threads, sizeof *th);

@@ -3,7 +3,7 @@ import { decodePng, mojangPng, W, H } from "./png.js";
 import { sha256, toHex } from "./hash.js";
 import { prepareSkin, autoChoose, rebuildJob, selfTest, makeTestVectors, makeRng, MAX_K } from "./job.js";
 import { initDevice, webgpuAvailable, prepareGpuJob } from "./gpu.js";
-import { parseHexList, targetList, targetKey, gpuTargets, gpuNmTargets, expectedTries, MAXCONT, MAXANCH, anchoredTargets, needsSliding, patternOf } from "./targets.js";
+import { parseHexList, targetList, targetKey, gpuTargets, gpuNmTargets, expectedTries, MAXCONT, MAXANCH, anchoredTargets, needsSliding, patternOf, isRecord, statLinesOf, recordTargets } from "./targets.js";
 import { parsePatternText, fmtOdds, WARN_ODDS } from "./patterns.js";
 import { MAXPAT } from "./wgsl.js";
 import { verifyHit, verifyNmHit, verifyBoth } from "./verify.js";
@@ -12,7 +12,7 @@ import { NmGpuJob } from "./nmgpu.js";
 import { resolveSkin, ImportError } from "./import.js";
 
 const $ = (id) => document.getElementById(id);
-const S = { rates: {}, phases: [], mode: "mojang", nprep: null, prep: null, orig: null, name: "skin", running: false, stop: false, gpu: null, hits: [], gate: null, bench: null, log: [] };
+const S = { records: new Map(), rates: {}, phases: [], mode: "mojang", nprep: null, prep: null, orig: null, name: "skin", running: false, stop: false, gpu: null, hits: [], gate: null, bench: null, log: [] };
 window.__skinhash = S;   // exposed for automated tests
 
 const fmt = (n) => n >= 1e12 ? (n / 1e12).toFixed(2) + " T" : n >= 1e9 ? (n / 1e9).toFixed(2) + " G" : n >= 1e6 ? (n / 1e6).toFixed(2) + " M" : n >= 1e3 ? (n / 1e3).toFixed(1) + " k" : String(Math.round(n));
@@ -161,8 +161,9 @@ function readGroup(nm, ids) {
   const pt = parsePatternText($(ids[4]).value, nm ? 16 : 64);
   const errors = [...p.errors, ...s.errors, ...c.errors, ...pt.errors];
   const zeros = Math.max(0, Math.min(15, parseInt($(ids[3]).value || "0", 10) || 0));
-  const targets = targetList({ prefixes: p.list, suffixes: s.list, contains: c.list, patterns: pt.patterns, zeros });
+  const targets = targetList({ prefixes: p.list, suffixes: s.list, contains: c.list, patterns: pt.patterns, stats: pt.stats, zeros });
   const width = nm ? 16 : 64;
+  for (const t of targets) if (isRecord(t)) t.best = S.records.get(`${width}:${t.text}`) ?? null;   // the best of this session
   const nslide = c.list.length + pt.patterns.filter((x) => x.prefilter().kind === "sliding").length;
   const nanch = pt.patterns.filter((x) => x.prefilter().kind === "anchored").length;
   if (nslide > MAXCONT) errors.push(`At most ${MAXCONT} contains patterns and unanchored patterns together.`);
@@ -181,6 +182,19 @@ function renderPatInfo(id, pt, width) {
   for (const l of pt.lines) {
     const li = document.createElement("li");
     if (l.error) { li.className = "bad"; li.textContent = l.error; ul.appendChild(li); continue; }
+    if (l.stat) {
+      const best = l.stat.record ? S.records.get(`${width}:${l.stat.text}`) ?? null : null;
+      const p = l.stat.probability(best);
+      const code = document.createElement("code"); code.textContent = l.stat.text;
+      li.appendChild(code);
+      let txt = l.stat.record
+        ? ` record line (${l.stat.record === "max" ? "most" : "fewest"}), best so far ${best ?? "none"}: a new record is ${fmtOdds(p)}, ${p <= 0 ? "never" : "~" + fmtTime(1 / p / rate)} at ${fmt(rate)}/s${assumed ? " (assumed)" : ""}`
+        : ` ${fmtOdds(p)}, ${p <= 0 ? "never" : 1 / p / rate < 0.1 ? "< 0.1 s" : "~" + fmtTime(1 / p / rate)} at ${fmt(rate)}/s${assumed ? " (assumed)" : ""}`;
+      if (!l.stat.record && p > WARN_ODDS) { li.className = "warn"; txt += ". Very common: hits will come faster than they can be checked."; }
+      li.appendChild(document.createTextNode(txt));
+      ul.appendChild(li);
+      continue;
+    }
     const p = l.pattern.probability(), f = l.pattern.prefilter();
     const code = document.createElement("code"); code.textContent = l.pattern.text;
     li.appendChild(code);
@@ -272,6 +286,25 @@ function addHit(r, whys) {
   S.hits.push({ id: r.id, hex: r.hex, url, png: r.png, whys: whys.map(targetKey) });
 }
 
+/** A new record: a normal result entry, labelled "RECORD <line>: value (was old)". */
+function recordWhy(t, value, was) { return [{ kind: "RECORD", text: `${t.text}: ${value} (was ${was ?? "none"})` }]; }
+/** Compare the records among a verified hit's targets with the best so far. Returns the improved ones. */
+function takeRecords(r, recWhys, width, raise) {
+  const improved = [];
+  for (const t of recWhys) {
+    const line = patternOf(t, width);
+    const { ok, value } = line.evaluate(width === 16 ? r.id16 : r.hex);
+    if (!ok || !line.beats(value, t.best)) continue;
+    const was = t.best;
+    t.best = value;
+    S.records.set(`${width}:${t.text}`, value);
+    raise?.(t, value);
+    improved.push({ t, value, was });
+  }
+  return improved;
+}
+$("resetrec").addEventListener("click", () => { S.records.clear(); updateExpect(); });
+
 // ---------- search ----------
 const rate = { samples: [] };
 function stats(tried, best, t0) {
@@ -309,8 +342,10 @@ async function runMojang(bench, opts) {
   $("rate").textContent = "–"; $("tried").textContent = "0"; $("best").textContent = "0"; $("elapsed").textContent = "0 s";
   const allMode = opts ? !!opts.allMode : (!bench && document.querySelector("input[name=stop]:checked").value === "all");
   const maxHits = opts ? 1 : Math.max(1, parseInt($("stopn").value || "1", 10) || 1);
-  const remaining = new Map(targets.map((t) => [targetKey(t), t]));
+  const remaining = new Map(targets.filter((t) => !isRecord(t)).map((t) => [targetKey(t), t]));
   const wantNow = () => [...remaining.values()];
+  const recs = recordTargets(targets), statLines = statLinesOf(targets, 64), stat = statLines.length ? { lines: statLines } : null;
+  const raiseRec = (t, v) => { const i = recs.indexOf(t); if (i >= 0 && !patternOf(t, 64).gpuExact()) g?.raiseRecord(i, v); };
   const rng = makeRng();
   let g = null, totalTried = 0, bestZeros = 0, t0 = performance.now(), hitCount = 0, dropped = 0, bad = 0;
   rate.samples = [];
@@ -324,13 +359,16 @@ async function runMojang(bench, opts) {
       const r = await verifyHit(job, S.prep, idx, targets);
       if (!r.ok) { bad++; showErr("runerr", `A hit failed CPU verification and was dropped (${r.error}). ${bad} so far.`); continue; }
       if (S.stop) break;
+      const normWhys = r.whys.filter((t) => !isRecord(t));
+      for (const x of takeRecords(r, r.whys.filter(isRecord), 64, raiseRec)) { if (!opts?.quiet) addHit(r, recordWhy(x.t, x.value, x.was)); }
+      if (!normWhys.length) continue;
       if (allMode) {
-        const fresh = r.whys.filter((t) => remaining.has(targetKey(t)));
+        const fresh = normWhys.filter((t) => remaining.has(targetKey(t)));
         if (!fresh.length) { dropped++; continue; }
         fresh.forEach((t) => remaining.delete(targetKey(t)));
         emit(r, fresh);
-        if (g) { const gt = gpuTargets(wantNow()); g.setTargets(gt.pats, gt.zeros, gt.cont, gt.anchKeys); }
-      } else emit(r, r.whys);
+        if (g) { const gt = gpuTargets(wantNow()); g.setTargets(gt.pats, gt.zeros, gt.cont, gt.anchKeys, gt.statKeys); }
+      } else emit(r, normWhys);
       hitCount++; finishCheck();
     }
     draining = false;
@@ -353,12 +391,13 @@ async function runMojang(bench, opts) {
       const nSelf = selfTest(job, rng, 250);
       makeTestVectors(job, rng, 24, 104);   // 24 against full pako, 104 more from the byte-level builder
       setStatus("Compiling GPU kernel and checking it against the CPU...");
-      const prepared = await prepareGpuJob(device, job, { wg: Number(new URLSearchParams(location.search).get("wg")) || 256, contains: needsSliding(targets, 64), anchored: anchoredTargets(targets) });
+      const prepared = await prepareGpuJob(device, job, { wg: Number(new URLSearchParams(location.search).get("wg")) || 256, contains: needsSliding(targets, 64), anchored: anchoredTargets(targets), stat });
       g = prepared.g;
       const gate = prepared.gate;
       S.gate = { ...gate, selfTest: nSelf };
       if (!gate.ok) throw new Error(`GPU check failed: ${gate.bad} of ${gate.n} test vectors differ from the CPU (${gate.detail}). Search not started.`);
-      const gt = gpuTargets(wantNow()); g.setTargets(gt.pats, gt.zeros, gt.cont, gt.anchKeys);
+      const gt = gpuTargets(wantNow()); g.setTargets(gt.pats, gt.zeros, gt.cont, gt.anchKeys, gt.statKeys);
+      g.setRecordBests?.(recs.map((t) => t.best));
       if (bench && sets === 1) setTimeout(() => (S.stop = true), 10000);
       setStatus(`${bench ? "Benchmark" : "Searching"}. GPU matches CPU on ${gate.n}/${gate.n} test vectors. ${job.K} search pixels, ${job.nblk} SHA block${job.nblk > 1 ? "s" : ""}, ${gate.kernel} kernel.`, "ok");
       const base = totalTried, tRun = performance.now(); runT0 = tRun;
@@ -427,7 +466,9 @@ async function runNameMc(bench, opts) {
   $("rate").textContent = "–"; $("tried").textContent = "0"; $("best").textContent = "0"; $("elapsed").textContent = "0 s";
   const allMode = opts ? !!opts.allMode : (!bench && document.querySelector("input[name=stop]:checked").value === "all");
   const maxHits = opts ? 1 : Math.max(1, parseInt($("stopn").value || "1", 10) || 1);
-  const remaining = new Map(targets.map((t) => [targetKey(t), t]));
+  const remaining = new Map(targets.filter((t) => !isRecord(t)).map((t) => [targetKey(t), t]));
+  const recs = recordTargets(targets), statLines = statLinesOf(targets, 16), stat = statLines.length ? { lines: statLines } : null;
+  const raiseRec = (t, v) => { const i = recs.indexOf(t); if (i >= 0 && !patternOf(t, 16).gpuExact()) g?.raiseRecord(i, v); };
   const rng = makeRng();
   let g = null, hitCount = 0, dropped = 0, bad = 0, bestZeros = 0, totalTried = 0;
   const t0 = performance.now();
@@ -442,13 +483,16 @@ async function runNameMc(bench, opts) {
       const r = await verifyNmHit(prep, c, targets);
       if (!r.ok) { bad++; showErr("runerr", `A hit failed CPU verification and was dropped (${r.error}). ${bad} so far.`); continue; }
       if (S.stop) break;
+      const normWhys = r.whys.filter((t) => !isRecord(t));
+      for (const x of takeRecords(r, r.whys.filter(isRecord), 16, raiseRec)) { if (!opts?.quiet) addNmHit(r, recordWhy(x.t, x.value, x.was), !!opts?.intermediate); }
+      if (!normWhys.length) continue;
       if (allMode) {
-        const fresh = r.whys.filter((t) => remaining.has(targetKey(t)));
+        const fresh = normWhys.filter((t) => remaining.has(targetKey(t)));
         if (!fresh.length) { dropped++; continue; }
         fresh.forEach((t) => remaining.delete(targetKey(t)));
         emit(r, fresh);
         g?.setTargets(gpuNmTargets([...remaining.values()]));
-      } else emit(r, r.whys);
+      } else emit(r, normWhys);
       hitCount++; finishCheck();
     }
     draining = false;
@@ -462,12 +506,13 @@ async function runNameMc(bench, opts) {
     await new Promise((r) => setTimeout(r, 10));
     const tests = makeNmTests(prep, rng, 96);
     setStatus("Compiling GPU kernel and checking it against the CPU...");
-    g = new NmGpuJob(device, prep, tests, { wg: Number(new URLSearchParams(location.search).get("wg")) || 256, contains: needsSliding(targets, 16) });
+    g = new NmGpuJob(device, prep, tests, { wg: Number(new URLSearchParams(location.search).get("wg")) || 256, contains: needsSliding(targets, 16), stat });
     await g.build();
     const gate = await g.gate();
     S.gate = { ...gate, selfTest: tests.length };
     if (!gate.ok) throw new Error(`GPU check failed: ${gate.bad} of ${gate.n} test vectors differ from the CPU (${gate.detail}). Search not started.`);
     g.setTargets(gpuNmTargets([...remaining.values()]));
+    g.setRecordBests(recs.map((t) => t.best));
     if (bench) setTimeout(() => (S.stop = true), 10000);
     setStatus(`${bench ? "Benchmark" : "Searching"} (NameMC). GPU matches CPU on ${gate.n}/${gate.n} test vectors. ${prep.nb} SHA block${prep.nb > 1 ? "s" : ""}, ${prep.fast ? "fast" : "general"} kernel.`, "ok");
     const tRun = performance.now(); runT0 = tRun;
@@ -517,6 +562,7 @@ async function startBoth() {
   const a = readGroup(true, NM_IDS), b = readGroup(false, MJ_IDS);
   showErr("targeterr", [...a.errors, ...b.errors].join(" "));
   if (a.errors.length || b.errors.length) return;
+  if ([...a.targets, ...b.targets].some(isRecord)) { showErr("targeterr", "Record lines ({max} / {min}) are not supported in Both mode; use the Mojang or NameMC mode."); return; }
   if (!a.targets.length && !b.targets.length) { showErr("targeterr", "Enter NameMC targets, Mojang targets, or both. An empty phase is skipped."); return; }
   if (!(S.nprep?.eligible && S.prep?.eligible)) return;
   S.running = true; S.stop = false; S.userStop = false; S.error = null; S.gate = null; updateButtons();

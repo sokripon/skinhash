@@ -656,7 +656,7 @@ static void *worker(void *arg) {
             uint64_t tp = trimmed_top64(hi, (uint64_t)s[2] << 32 | s[3]);
 
             const char *why = NULL;
-            char whybuf[200];
+            char whybuf[WHYBUF];
             for (int i = 0; i < npats; i++) {
                 uint64_t v = pats[i].suffix ? lo : tp;
                 if ((v & pats[i].mask) == pats[i].val) {
@@ -677,6 +677,13 @@ static void *worker(void *arg) {
                 int k = mpat_find(mpats, nmpats, dd);
                 if (k >= 0) { snprintf(whybuf, sizeof whybuf, "match:%s", mpats[k].text); why = whybuf; }
             }
+            uint8_t sdg[32];
+            stat_res_t sr; int nrec = 0;
+            if (nslines) {
+                for (int i = 0; i < 8; i++) { sdg[4*i] = s[i] >> 24; sdg[4*i+1] = s[i] >> 16; sdg[4*i+2] = s[i] >> 8; sdg[4*i+3] = s[i]; }
+                nrec = stat_check(sdg, &sr);
+                if (!why && sr.thr >= 0) { snprintf(whybuf, sizeof whybuf, "match:%s", slines[sr.thr].text); why = whybuf; }
+            }
             int zn = hi ? __builtin_clzll(hi) / 4 : 16;
             if (zn > best) {
                 best = atomic_load(&g_best_zeros);
@@ -687,7 +694,7 @@ static void *worker(void *arg) {
                 snprintf(whybuf, sizeof whybuf, "zeros:%d", zn);
                 why = whybuf;
             }
-            if (why) {
+            if (why || nrec) {
                 check_candidate(perm, buf, "hit");
                 static __thread uint8_t raw[RAW_LEN], file[FILE_CAP];
                 memcpy(raw, g_raw, RAW_LEN);
@@ -701,9 +708,16 @@ static void *worker(void *arg) {
                         fprintf(stderr, "fastfinder: hit digest mismatch\n"); exit(3);
                     }
                 }
-                report(file, flen, d, total + local, why);
-                long long h = atomic_fetch_add(&g_hits, 1) + 1;
-                if (g_max_hits > 0 && h >= g_max_hits) atomic_store(&g_stop, 1);
+                if (why) {
+                    report(file, flen, d, total + local, why);
+                    long long h = atomic_fetch_add(&g_hits, 1) + 1;
+                    if (g_max_hits > 0 && h >= g_max_hits) atomic_store(&g_stop, 1);
+                }
+                for (int j = 0; j < nrec; j++) {
+                    char rw[WHYBUF];
+                    record_why(rw, sizeof rw, sr.rline[j], sr.rval[j]);
+                    report(file, flen, d, total + local, rw);
+                }
             }
 
             /* next permutation: one Heap swap */
@@ -766,6 +780,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "-s") && v) { if (parse_pat(v, 1)) { fprintf(stderr, "bad -s %s\n", v); return 1; } i++; }
         else if (!strcmp(a, "-c") && v) { if (parse_contains(v)) { fprintf(stderr, "bad -c %s\n", v); return 1; } i++; }
         else if (!strcmp(a, "-m") && v) { if (parse_match(v, 64)) return 1; i++; }
+        else if (!strcmp(a, "--best") && i + 2 < argc) { if (parse_best(argv[i + 1], argv[i + 2])) return 1; i += 2; }
         else if (!strcmp(a, "-z") && v) { g_zeros = atoi(v); i++; }
         else if (!strcmp(a, "-t") && v) { g_threads = atoi(v); i++; }
         else if (!strcmp(a, "-S") && v) { g_seed = strtoull(v, NULL, 0); i++; }
@@ -796,8 +811,8 @@ int main(int argc, char **argv) {
     else setup_fast(&rng);
     self_test(&rng);
     if (g_dump) { dump_job(g_dump, &rng); return 0; }
-    fprintf(stderr, "threads=%d seed=%llu K=%d patterns=%d contains=%d match=%d zeros>=%d sha=%s\n", g_threads,
-            (unsigned long long)g_seed, g_K, npats, ncpats, nmpats, g_zeros,
+    fprintf(stderr, "threads=%d seed=%llu K=%d patterns=%d contains=%d match=%d stat=%d zeros>=%d sha=%s\n", g_threads,
+            (unsigned long long)g_seed, g_K, npats, ncpats, nmpats, nslines, g_zeros,
             sha256_block == sha256_block_generic ? "generic" : "sha-ni");
     fflush(stderr);
 

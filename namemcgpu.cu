@@ -56,6 +56,7 @@
 typedef unsigned long long u64;
 typedef uint32_t u32;
 typedef uint8_t u8;
+#include "gpustat.cuh"
 
 __constant__ u32 c_mid[8];
 __constant__ u32 c_img[MAXNB * 16];     /* base words, big-endian; knob words hold 0x00000001 */
@@ -166,7 +167,7 @@ constexpr __host__ __device__ DepTab make_dep() {
  * do not depend on word 11 run once per thread, and every dependent schedule word keeps the sum of its
  * independent terms in a register (pw). The 1024-candidate loop does only rounds 11-63 of the first block
  * and the dependent part of the schedule, then the constant second block. */
-template <int MODE, bool CONT>
+template <int MODE, bool CONT, bool STAT = false>
 __global__ void __launch_bounds__(BLOCK, MINB) fast_kernel(u64 base, const u64 *tc, u32 n, u64 *out) {
     constexpr DepTab dep = make_dep();
     u32 gid = blockIdx.x * BLOCK + threadIdx.x;
@@ -230,14 +231,16 @@ __global__ void __launch_bounds__(BLOCK, MINB) fast_kernel(u64 base, const u64 *
         if (MODE) { if (t == tsel) out[gid] = id; }
         else {
             best = id < best ? id : best;
-            if (is_hit<CONT>(id)) record(cb + t);
+            bool hit = is_hit<CONT>(id);
+            if (STAT) { Dg<2> dg = {{st[0], st[1]}}; if (stat_check<2>(dg)) hit = true; }
+            if (hit) record(cb + t);
         }
     }
     if (!MODE) atomicMin(&d_best, best);
 }
 
 /* general kernel: any block layout, one candidate per thread */
-template <int MODE, bool CONT>
+template <int MODE, bool CONT, bool STAT = false>
 __global__ void __launch_bounds__(BLOCK, MINB) general_kernel(u64 base, const u64 *tc, u32 n, u64 *out) {
     u32 gid = blockIdx.x * BLOCK + threadIdx.x;
     if (gid >= n) return;
@@ -266,7 +269,9 @@ __global__ void __launch_bounds__(BLOCK, MINB) general_kernel(u64 base, const u6
     if (MODE) out[gid] = id;
     else {
         atomicMin(&d_best, id);
-        if (is_hit<CONT>(id)) record(c);
+        bool hit = is_hit<CONT>(id);
+        if (STAT) { Dg<2> dg = {{st[0], st[1]}}; if (stat_check<2>(dg)) hit = true; }
+        if (hit) record(c);
     }
 }
 
@@ -370,6 +375,8 @@ static size_t g_off[NK];
 static std::vector<Pat> g_pats;
 static std::vector<CPat> g_cont;
 static std::vector<mpat_t> g_mp;
+static std::vector<sline_t> g_sl;       /* stat lines (gpustat.cuh) */
+static int g_best[ST_MAXLINES];
 static u32 g_zeros = 0;
 
 static void put32(u8 *p, u32 v) { p[0] = v >> 24; p[1] = v >> 16; p[2] = v >> 8; p[3] = v; }
@@ -432,11 +439,13 @@ static bool match_why(u64 id, std::string &why) {
 }
 
 int main(int argc, char **argv) {
+    if (argc >= 2 && !strcmp(argv[1], "--stat-selftest")) return stat_selftest_cli<2>(argc, argv);
     if (argc < 5) { fprintf(stderr, "usage: namemcgpu rgba.bin OUTDIR -k x,y,x,y,x,y [--render-exe EXE] [-p HEX]... [-s HEX]... [-c HEX]... [-m PATTERN]... [-z N] [-S SEED] [-n N] [-b]\n"); return 1; }
     FILE *fp = fopen(argv[1], "rb");
     if (!fp || fread(g_rgba, 1, sizeof g_rgba, fp) != sizeof g_rgba) { fprintf(stderr, "bad rgba file\n"); return 1; }
     fclose(fp);
     std::string outdir = argv[2], render_exe = "namemcfinder.exe", rgba_path = argv[1];
+    int selftest = 0, best_arg[ST_MAXLINES] = {0}, have_best[ST_MAXLINES] = {0};
     long long max_hits = -1;
     int bench = 0, have_k = 0;
     u64 seed = (u64)std::chrono::system_clock::now().time_since_epoch().count() * 0x9E3779B97F4A7C15ULL;
@@ -455,6 +464,17 @@ int main(int argc, char **argv) {
             CPat c;
             if (!parse_contains(v, c) || g_cont.size() >= MAXCONT) { fprintf(stderr, "bad -c %s\n", v); return 1; }
             g_cont.push_back(c); i++;
+        }
+        else if (!strcmp(a, "--stat-selftest")) selftest = 1;
+        else if (!strcmp(a, "--best") && i + 2 < argc) {
+            int li = atoi(argv[i + 1]);
+            if (li < 0 || li >= ST_MAXLINES) { fprintf(stderr, "bad --best\n"); return 1; }
+            best_arg[li] = atoi(argv[i + 2]); have_best[li] = 1; i += 2;
+        }
+        else if (!strcmp(a, "-m") && v && st_is_stat(v)) {
+            sline_t sl; char err[256];
+            if (sline_parse(v, 16, &sl, err, sizeof err) || g_sl.size() >= ST_MAXLINES) { fprintf(stderr, "bad -m %s %s\n", v, err); return 1; }
+            g_sl.push_back(sl); i++;
         }
         else if (!strcmp(a, "-m") && v) {
             mpat_t mp; char err[256];
@@ -574,15 +594,29 @@ int main(int argc, char **argv) {
         CK(cudaMemcpyToSymbol(c_cp, cp, sizeof cp));
     }
     const bool cont = !g_cont.empty();
+    StatTables ST;
+    const bool stat = !g_sl.empty();
+    if (stat) {
+        char err[256];
+        if (!stat_build(g_sl, 2, ST, err, sizeof err)) { fprintf(stderr, "namemcgpu: %s\n", err); return 1; }
+        for (size_t i = 0; i < g_sl.size(); i++) {
+            const int r = g_sl[i].rec_term >= 0 ? g_sl[i].t[g_sl[i].rec_term].rec : 0;
+            g_best[i] = have_best[i] ? best_arg[i] : (r == 2 ? ST_NONE_MIN : ST_NONE_MAX);
+        }
+        stat_upload<2>(ST, g_best);
+    }
+    if (selftest) return stat_selftest_main<2>(g_sl, ST);
 
     auto launch = [&](bool test, u64 base, const u64 *tc, u32 n, u64 *out) {
         u32 grid = (n + BLOCK - 1) / BLOCK;
         if (fast) {
             if (test) fast_kernel<1, false><<<grid, BLOCK>>>(base, tc, n, out);
+            else if (stat) fast_kernel<0, true, true><<<grid, BLOCK>>>(base, tc, n, out);
             else if (cont) fast_kernel<0, true><<<grid, BLOCK>>>(base, tc, n, out);
             else fast_kernel<0, false><<<grid, BLOCK>>>(base, tc, n, out);
         } else {
             if (test) general_kernel<1, false><<<grid, BLOCK>>>(base, tc, n, out);
+            else if (stat) general_kernel<0, true, true><<<grid, BLOCK>>>(base, tc, n, out);
             else if (cont) general_kernel<0, true><<<grid, BLOCK>>>(base, tc, n, out);
             else general_kernel<0, false><<<grid, BLOCK>>>(base, tc, n, out);
         }
@@ -650,7 +684,21 @@ int main(int argc, char **argv) {
             for (u64 c : hits) {
                 u8 sha[32]; u64 id = ref_id(c, sha);
                 std::string why;
-                if (!match_why(id, why)) { fprintf(stderr, "namemcgpu: GPU hit counter %llu fails CPU re-check (ignored)\n", (unsigned long long)c); continue; }
+                bool tw = match_why(id, why);
+                stat_res_t sr; sr.thr = -1; sr.nrec = 0;
+                if (stat) {
+                    u8 b8[8];
+                    for (int i = 0; i < 8; i++) b8[i] = (u8)(id >> (56 - 8 * i));
+                    stat_find(g_sl.data(), (int)g_sl.size(), b8, g_best, &sr);
+                    if (!tw && sr.thr >= 0) { why = std::string("match:") + g_sl[sr.thr].text; tw = true; }
+                    int k = 0;
+                    for (int j = 0; j < sr.nrec; j++) {
+                        const int li = sr.rline[j], v = sr.rval[j];
+                        if (st_beats(g_sl[li].t[g_sl[li].rec_term].rec, v, g_best[li])) { g_best[li] = v; sr.rline[k] = li; sr.rval[k++] = v; }
+                    }
+                    sr.nrec = k;
+                }
+                if (!tw && !sr.nrec) { fprintf(stderr, "namemcgpu: GPU hit counter %llu fails CPU re-check (ignored)\n", (unsigned long long)c); continue; }
                 char hex[65], id16[17];
                 for (int i = 0; i < 32; i++) snprintf(hex + 2 * i, 3, "%02x", sha[i]);
                 snprintf(id16, sizeof id16, "%016llx", (unsigned long long)id);
@@ -658,11 +706,19 @@ int main(int argc, char **argv) {
                 std::string cmd = "\"" + render_exe + "\" \"" + rgba_path + "\" \"" + outdir + "\" -k " + kopt + " --render " +
                                   std::to_string(c) + " --expect " + id16;
                 if (run_cmd(cmd) != 0) { fprintf(stderr, "namemcgpu: rendering the PNG failed (%s)\n", cmd.c_str()); return 1; }
-                printf("HIT %s sha=%s id=%s counter=%llu file=%s\n", why.c_str(), hex, id16, (unsigned long long)c, path.c_str());
-                fflush(stdout);
-                nhit_total++;
-                if (max_hits > 0 && (long long)nhit_total >= max_hits) { stop = true; break; }
+                if (tw) {
+                    printf("HIT %s sha=%s id=%s counter=%llu file=%s\n", why.c_str(), hex, id16, (unsigned long long)c, path.c_str());
+                    fflush(stdout);
+                    nhit_total++;
+                }
+                for (int j = 0; j < sr.nrec; j++) {
+                    printf("HIT record:%s=%d sha=%s id=%s counter=%llu file=%s\n", g_sl[sr.rline[j]].text, sr.rval[j], hex, id16, (unsigned long long)c, path.c_str());
+                    fflush(stdout);
+                }
+                if (tw && max_hits > 0 && (long long)nhit_total >= max_hits) { stop = true; break; }
             }
+            for (size_t li = 0; li < g_sl.size(); li++)
+                if (g_sl[li].rec_term >= 0 && !ST.lines[li].exact) { int b = g_best[li]; CK(cudaMemcpyToSymbol(d_rbest, &b, 4, li * 4)); }
         }
         double t = now_s();
         if (bench && t - t0 >= 10) stop = true;

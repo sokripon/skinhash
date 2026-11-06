@@ -199,6 +199,36 @@ The served file is byte-identical to the downloaded PNG. It differs from Steve i
 
 `pixel-map.svg` is generated from the same layout tables the tool uses: `py docs/make_pixel_map.py`.
 
+### Stat lines and records
+
+A stat line (`#0{24,}`, `~{max}`, `+{12}`, `(??)\1{6}`, `##{,9}`, `A & B`, see the README) asks about the shape of the
+id instead of fixed digits. The id is only a string of 4-bit digits, so each statistic is a short bit trick on the
+digest words (8 words for Mojang, 2 for NameMC) and the GPU computes the exact value, not a prefilter:
+
+- **count** of a digit: the nibbles that equal the digit are found with one xor and the classic "nibble is zero" test
+  (`~(((x & 0x7777_7777) + 0x7777_7777) | x | 0x7777_7777)`, a flag in bit 3 of each nibble), then a popcount.
+  Letters (a-f) are bit 3 and (bit 2 or bit 1). The zeros that the link drops are subtracted.
+- **different digits**: the OR of `1 << nibble` over all 64 digits (bit 0 only if a zero is visible).
+- **periodic run** (one digit repeated, a pair repeated ...): digit i equals digit i+p is the same zero test on the
+  digest xor itself shifted by p nibbles; the flags are packed into a 64-bit mask (one bit per digit) and a run of r
+  flags is found by AND-ing the mask with copies of itself shifted by 1, 2, 4 ... digits (log2 r steps).
+- **staircase**: digit i+1 equals digit i plus one is the same test against a nibble-wise increment
+  (`((x & 0x7777_7777) + 0x1111_1111) ^ (x & 0x8888_8888)`), minus the digit `f`; a down staircase is an up staircase
+  of the complemented digits.
+- **palindrome**: the digest is compared with its nibble-reversed copy, 8 digits at a time, at every centre (even
+  and odd); only a centre that matches 8 pairs (or as many as the target needs) is expanded exactly, out of line.
+- **words**: one 32-bit window compare per word and offset.
+
+Mojang counts and shapes look at the link id, so the leading zero digits are masked out of every test.
+Record lines keep their best value in device memory; a candidate is only reported if it beats the best, and the
+device raises the best with an atomic max/min, so a launch reports a short increasing list instead of every hit. The
+host re-computes the value with the reference code (`st_eval` in `pattern.h`) before it prints `HIT record:...`,
+and `skinhash.py` checks it once more against `patterns.py` and saves the skin under `OUT/records/`.
+Where the device cannot be exact (an unanchored `X{max}` with a prefix, `?d`/`?l` in a `^` prefix) the device best is
+raised by the host after the re-check instead. The CPU finders run the C reference on every hash.
+In the kernels this is one more template flag ("stat"): the op table of all lines lives in constant memory and is
+walked with uniform branches; searches without stat lines are compiled without it.
+
 ## 6. NameMC ids
 
 NameMC identifies a skin by a different hash than Mojang's texture id:

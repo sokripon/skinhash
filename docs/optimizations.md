@@ -380,6 +380,66 @@ contains pattern costs (about 12% on Mojang, 3% on NameMC). `?l{8}` is a true ma
 passes its prefilter every 4-5 candidates, so the hit buffer (4096 per launch) overflows on every launch and the host
 spends its time re-checking; the rate shown is the GPU side only. The CLI warns about such patterns.
 
+### Cost of stat lines
+
+Stat lines (`#0{24,}`, `~{25}`, `+{12}`, `~{max}` ..., see the README) are computed exactly on the GPU by `gpustat.cuh`.
+It is one more template flag on the search kernels ("stat") and one op table in constant memory that all lines
+share, so a search without stat lines compiles exactly as before. The stat variant is a single extra instantiation: it
+is built with the contains and anchored checks switched on (their loops have a run-time count that is 0 when unused),
+so the fast kernel goes from 4 to 5 search variants. The stat check itself is a `__noinline__` function (forcing it
+inline gave the same speed, 3.46 vs 3.47 G/s on `+{12}`, and a slower build); the palindrome and word-count code
+are separate non-inlined functions.
+
+Measured like the pattern table: `gpufinder -b` / `namemcgpu -b`, one fixed steve.png job (K=5, fast kernel WI=6
+KB=8), three alternating runs, median, on an idle GPU. "Old" is a build of the commit before this change, "new" the
+build with stat lines; both were compiled with CUDA 13.0 (see below).
+
+| Targets | Mojang old | Mojang new | NameMC old | NameMC new |
+|---|---|---|---|---|
+| none (benchmark) | 4.80 | 4.85 | 2.98 | 2.96 |
+| `-p c0ffee` | 4.73 | 4.73 | 3.00 | 3.03 |
+| `-z 12` | 4.81 | 4.82 | 3.02 | 3.03 |
+| `-c c0ffee` | 4.21 | 4.10 | 2.97 | 2.97 |
+| `-m ^0{12} -m ^????0{12} -m c0ffee$` | 4.30 | 4.39 | 3.01 | 2.97 |
+| `-m c0ffee12` | 4.15 | 4.07 | 2.94 | 2.94 |
+| `-m ^cafe*babe$` | 4.65 | 4.67 | 2.97 | 2.99 |
+
+Without stat lines the new build is as fast as the old one (0.97-1.02 in these alternating runs, the spread of the
+measurement is about +-2%). Cost of the stat lines themselves, new build, G/s and ratio to the new build without a
+stat line in the same session (4.79 Mojang / 3.08 NameMC):
+
+| Stat line (NameMC uses the shorter one in brackets) | Mojang | ratio | NameMC | ratio |
+|---|---|---|---|---|
+| `#0{24,}` (`#0{12,}`) | 3.64 | 0.76 | 3.00 | 0.97 |
+| `#?l{,0}` | 3.74 | 0.78 | 2.99 | 0.97 |
+| `##{,9}` (`##{,5}`) | 3.80 | 0.79 | 2.96 | 0.96 |
+| `+{12}` (`+{9}`) | 3.43 | 0.72 | 2.84 | 0.92 |
+| `(?)\1{11}` (`{8}`) | 3.45 | 0.72 | 2.87 | 0.93 |
+| `(??)\1{6}` (`{4}`) | 3.60 | 0.75 | 2.86 | 0.93 |
+| `~{25}` (`~{13}`) | 3.25 | 0.68 | 2.78 | 0.90 |
+| `~{max}` | 3.17 | 0.66 | 2.84 | 0.92 |
+| `#?l{50,}` | 3.79 | 0.79 | | |
+| `#(dead\|beef\|cafe){3,}` | 1.23 | 0.26 | 2.27 | 0.74 |
+| 11 record lines at once (`#0{max} #?l{max} #?l{min} ##{min} +{max} -{max} (?)\1{max} (??)\1{max} ~{max} #(dead\|beef\|cafe){max} ^f{max}`) | 0.94 | 0.20 | 1.54 | 0.50 |
+
+Most of the Mojang cost is the same for every line (about 20%: the op table walk, the leading-zero count and the
+call, which a Mojang digest of 8 words makes larger than NameMC's 2 words); `##`, counts and runs add little on top.
+A palindrome costs another ~8% (the digest is compared with its nibble-reversed copy at 126 centres, ~500
+instructions). A word count compares every word at every offset (64 windows per word) and is the most expensive
+line: prefer few words. Lines add up (the 11-line row), the CLI prints the odds per line and the expected time at the
+measured rate.
+
+A record line reports only candidates that beat the best value (the device keeps the best and raises it with an
+atomic max/min on the exact value). The very first ids of a search all beat the "none yet" best and are reported until the best has climbed (a
+few batches); after that the hit buffer stays almost empty.
+
+Tried: forcing the stat check inline (same speed). Not tried: a stat variant per kind of the first term (would give the
+compiler a constant op, but multiplies the 24-layout instantiations; the build already takes ~8 minutes).
+
+CUDA toolchain: the exes were built with CUDA 13.0 (`nvcc` of CUDA 12.8, the one first on this machine's PATH, ran
+`ptxas` for more than 40 minutes on the kernel set without finishing, and was stopped; CUDA 13.0 needs ~8 minutes and
+makes a 4.4 MB exe instead of 11.8 MB). The comparison above is between two CUDA 13.0 builds, old source and new.
+
 ## Rejected ideas
 
 | Idea | Why not |

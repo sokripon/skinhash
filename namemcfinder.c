@@ -219,13 +219,25 @@ static void *worker(void *arg) {
                 while (zn > best && !atomic_compare_exchange_weak(&g_best_zeros, &best, zn)) {}
                 if (zn > best) best = zn;
             }
-            char wb[200];
+            char wb[WHYBUF];
             const char *why = match_why(id, wb, sizeof wb);
+            stat_res_t sr; int nrec = 0;
+            if (nslines) {
+                uint8_t sb[8];
+                for (int i = 0; i < 8; i++) sb[i] = (uint8_t)(id >> (56 - 8 * i));
+                nrec = stat_check(sb, &sr);
+                if (!why && sr.thr >= 0) { snprintf(wb, sizeof wb, "match:%s", slines[sr.thr].text); why = wb; }
+            }
             if (why) {
                 long long h = atomic_fetch_add(&g_hits, 1) + 1;
                 if (g_max_hits > 0 && h > g_max_hits) { atomic_store(&g_stop, 1); break; }
                 report(c, id, NULL, why);
                 if (g_max_hits > 0 && h >= g_max_hits) { atomic_store(&g_stop, 1); break; }
+            }
+            for (int j = 0; j < nrec; j++) {
+                char rw[WHYBUF];
+                record_why(rw, sizeof rw, sr.rline[j], sr.rval[j]);
+                report(c, id, NULL, rw);
             }
         }
         atomic_fetch_add_explicit(&g_tried, CHUNK, memory_order_relaxed);
@@ -290,6 +302,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "-s") && v) { if (parse_pat(v, 1)) { fprintf(stderr, "bad -s %s\n", v); return 1; } i++; }
         else if (!strcmp(a, "-c") && v) { if (parse_contains(v)) { fprintf(stderr, "bad -c %s\n", v); return 1; } i++; }
         else if (!strcmp(a, "-m") && v) { if (parse_match(v, 16)) return 1; i++; }
+        else if (!strcmp(a, "--best") && i + 2 < argc) { if (parse_best(argv[i + 1], argv[i + 2])) return 1; i += 2; }
         else if (!strcmp(a, "-z") && v) { g_zeros = atoi(v); i++; }
         else if (!strcmp(a, "-t") && v) { g_threads = atoi(v); i++; }
         else if (!strcmp(a, "-S") && v) { g_seed = strtoull(v, NULL, 0); i++; }
@@ -331,8 +344,8 @@ int main(int argc, char **argv) {
         return r;
     }
 
-    fprintf(stderr, "threads=%d seed=%llu knobs=(%d,%d)(%d,%d)(%d,%d) blocks=%zu patterns=%d contains=%d match=%d zeros>=%d sha=%s\n", g_threads,
-            (unsigned long long)g_seed, g_kx[0], g_ky[0], g_kx[1], g_ky[1], g_kx[2], g_ky[2], g_nblk, npats, ncpats, nmpats, g_zeros,
+    fprintf(stderr, "threads=%d seed=%llu knobs=(%d,%d)(%d,%d)(%d,%d) blocks=%zu patterns=%d contains=%d match=%d stat=%d zeros>=%d sha=%s\n", g_threads,
+            (unsigned long long)g_seed, g_kx[0], g_ky[0], g_kx[1], g_ky[1], g_kx[2], g_ky[2], g_nblk, npats, ncpats, nmpats, nslines, g_zeros,
             sha256_block == sha256_block_generic ? "generic" : "sha-ni");
     fflush(stderr);
     atomic_store(&g_next, (g_seed & ~(CHUNK - 1)));

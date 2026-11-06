@@ -68,4 +68,6 @@ textarea { font: .9rem/1.4 ui-monospace, Consolas, monospace; padding: 8px 10px;
 .patinfo li.bad { color: inherit; background: var(--err); border-radius: 4px; padding: 1px 6px; }
 .patinfo li.warn { background: var(--warn); border-radius: 4px; padding: 1px 6px; color: var(--fg); }
 .pathelp { margin: 6px 0 0; }
+.stathelp { border-collapse: collapse; margin: 4px 0; font-size: .8rem; }
+.stathelp td { padding: 2px 8px 2px 0; vertical-align: top; }
 .pathelp summary { cursor: pointer; }

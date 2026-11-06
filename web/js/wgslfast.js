@@ -10,6 +10,7 @@
 import { K256, crcRegister, CRC_TABLE } from "./hash.js";
 import { RIN, NPERM } from "./job.js";
 import { hitCode, MAXHITS, NTEST_STRIDE } from "./wgsl.js";
+import { statLib } from "./wgslstat.js";
 
 const hex = (v) => `0x${(v >>> 0).toString(16)}u`;
 const ror32 = (x, n) => ((x >>> n) | (x << (32 - n))) >>> 0;
@@ -207,7 +208,7 @@ function outerPart(D, F, P) {
   return s;
 }
 
-export function genFastShader(J, D, F, off, WG = 256, contains = false, anch = []) {
+export function genFastShader(J, D, F, off, WG = 256, contains = false, anch = [], stat = null) {
   const P = D.P, { WI, KB, sb, L, m, mo, lvl } = F;
   const tmplWord = (k) => D.tmpl[k];
   let s = `
@@ -231,7 +232,7 @@ fn shl2(a: u32, b: u32, sh: u32) -> u32 {
   return select((a << sh) | (b >> (32u - sh)), a, sh == 0u);
 }
 fn ror(x: u32, n: u32) -> u32 { return (x >> n) | (x << (32u - n)); }
-fn sg0(x: u32) -> u32 { return ror(x, 7u) ^ ror(x, 18u) ^ (x >> 3u); }
+${stat ? statLib(8) : ""}fn sg0(x: u32) -> u32 { return ror(x, 7u) ^ ror(x, 18u) ^ (x >> 3u); }
 fn sg1(x: u32) -> u32 { return ror(x, 17u) ^ ror(x, 19u) ^ (x >> 10u); }
 /** index of the k-th (0-based) set bit of a value below 2^20 */
 fn nth_set(x_in: u32, k_in: u32) -> u32 {
@@ -355,7 +356,7 @@ ${outerPart(D, F, P)}`;
       TOUT[tid * 8u + 4u] = s4; TOUT[tid * 8u + 5u] = s5; TOUT[tid * 8u + 6u] = s6; TOUT[tid * 8u + 7u] = s7;
       return;
     }
-    ${hitCode(contains, anch)}
+    ${hitCode(contains, anch, stat)}
   }
   if (zbest > 0u && zbest > atomicLoad(&HITS[1])) { atomicMax(&HITS[1], zbest); }
 }

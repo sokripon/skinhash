@@ -133,7 +133,40 @@ try {
     return r;
   });
   check(perr.info.length === 3 && perr.info[0][0] === "warn" && /< 0\.1 s/.test(perr.info[0][1]) && /~1 in 6\.6e4/.test(perr.info[0][1]) && perr.info[1][0] === "bad" && /not a hex digit/.test(perr.info[1][1])
-    && /not supported yet/.test(perr.info[2][1]) && /line 2/.test(perr.err), `Patterns box: per-line odds and errors ${JSON.stringify(perr.info)}`);
+    && /#0\{24,\}/.test(perr.info[2][1]) && /line 2/.test(perr.err), `Patterns box: per-line odds and errors ${JSON.stringify(perr.info)}`);
+
+  // stat lines: thresholds (count, run, staircase), checked with the Python reference
+  const MS = ["#0{9,}", "+{6}", "(?)\\1{5}"];
+  const rs = await runSearch("Mojang stat lines", { prefixes: "", suffixes: "", zeros: "0", patterns: MS.join("\n") }, 6);
+  check(rs.hits.length === 6 && rs.hits.every((h) => h.whys.some((w) => w.startsWith("stat:"))), "Mojang stat lines (#0{9,}, +{6}, (?)\\1{5}): 6 hits, each matches a stat line");
+  await grab(rs);
+  for (const h of rs.hits) {
+    const v = spawnSync("py", [path.join(here, "pattern_check.py"), "mojang", path.join(outDir, h.id + ".png"), ...MS], { cwd: repo, encoding: "utf8" });
+    check(v.status === 0 && /^OK/.test(v.stdout), `pattern_check (Python) stat ${h.id.slice(0, 20)}...: ${(v.stdout + v.stderr).trim().slice(0, 90)}`);
+  }
+  // a record line: ~{max} lists every new best palindrome until Stop; the values must rise and the Python reference agrees
+  const recRun = async (label, fields, mode, minHits) => {
+    await reset();
+    await page.evaluate(() => { __skinhash.hits.length = 0; document.querySelector("#hits").innerHTML = ""; });
+    for (const [id, v] of Object.entries({ contains: "", patterns: "", ...fields })) { await page.$eval("#" + id, (el, val) => { el.value = val; el.dispatchEvent(new Event("input")); }, v); }
+    await page.click("#start");
+    await page.waitForFunction(() => __skinhash.running, { timeout: 5000 });
+    await page.waitForFunction((n) => __skinhash.hits.length >= n || !__skinhash.running, { timeout: 90000, polling: 200 }, minHits);
+    await page.click("#stop");
+    await page.waitForFunction(() => !__skinhash.running, { timeout: 30000, polling: 200 });
+    const r = await page.evaluate(() => ({ err: __skinhash.error, hits: __skinhash.hits.map((h) => ({ id: h.id, whys: h.whys })) }));
+    console.log(`  ${label}: ${r.hits.length} record(s) ${r.err ? "ERROR " + r.err : ""}`);
+    return r;
+  };
+  const rr = await recRun("Mojang ~{max}", { prefixes: "", suffixes: "", zeros: "0", patterns: "~{max}" }, "mojang", 3);
+  const vals = rr.hits.map((h) => { const m = /^record:~\{max\}: (\d+) \(was (\d+|none)\)$/i.exec(h.whys[0]); return m ? [Number(m[1]), m[2] === "none" ? -1 : Number(m[2])] : null; });
+  check(rr.hits.length >= 3 && vals.every(Boolean) && vals.every(([v, was], i) => v > was && (i === 0 || was === vals[i - 1][0])), `Mojang ~{max}: ${rr.hits.length} records, each beats the previous best: ${JSON.stringify(vals)}`);
+  await grab(rr);
+  for (const h of rr.hits.slice(0, 4)) {
+    const v = spawnSync("py", [path.join(here, "pattern_check.py"), "mojang", path.join(outDir, h.id + ".png"), "~{max}"], { cwd: repo, encoding: "utf8" });
+    check(v.status === 0 && /^OK/.test(v.stdout), `pattern_check (Python) record ${h.id.slice(0, 20)}...: ${(v.stdout + v.stderr).trim().slice(0, 90)}`);
+  }
+  await page.click("#resetrec");
 
   // 3. verify with the native tool
   for (const d of downloaded) {
@@ -183,6 +216,19 @@ try {
     check(v.status === 0 && /^OK/.test(v.stdout), `pattern_check NameMC (Python) ${h.id}: ${(v.stdout + v.stderr).trim().slice(0, 90)}`);
     nmCheck(path.join(outDir, h.id + ".png"), "contains:");
   }
+
+  const NS = ["#0{6,}", "~{8}"];
+  const ns = await runSearch("NameMC stat lines", { prefixes: "", suffixes: "", zeros: "0", patterns: NS.join(", ") }, 3);
+  check(ns.hits.length === 3 && ns.hits.every((h) => h.id.length === 16 && h.whys.some((w) => w.startsWith("stat:"))), "NameMC stat lines (comma list): 3 hits");
+  await grab(ns);
+  for (const h of ns.hits) {
+    const v = spawnSync("py", [path.join(here, "pattern_check.py"), "namemc", path.join(outDir, h.id + ".png"), ...NS], { cwd: repo, encoding: "utf8" });
+    check(v.status === 0 && /^OK/.test(v.stdout), `pattern_check NameMC (Python) stat ${h.id}: ${(v.stdout + v.stderr).trim().slice(0, 90)}`);
+    nmCheck(path.join(outDir, h.id + ".png"), h.id.slice(0, 4));
+  }
+  const nr = await recRun("NameMC +{max}", { prefixes: "", suffixes: "", zeros: "0", patterns: "+{max}" }, "namemc", 2);
+  check(nr.hits.length >= 2 && nr.hits.every((h) => /^record:\+\{max\}: \d+ \(was (\d+|none)\)$/i.test(h.whys[0])), `NameMC +{max}: ${nr.hits.length} records`);
+  await page.click("#resetrec");
 
   // unused pixels only: the general kernel (about 50 SHA blocks per candidate)
   await page.click("#unusedonly");

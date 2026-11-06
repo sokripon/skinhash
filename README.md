@@ -127,7 +127,16 @@ py skinhash.py both skins/me.png --namemc-match '^0{6}' --mojang-match @mojang.t
 ```
 
 A pattern file has one pattern per line (comma lists work too); `#` starts a comment, blank lines are ignored.
-Errors name the file and line.
+Errors name the file and line. The comment after a pattern is its note: it is printed with each record, stored in
+`OUT/records.json` and written to `OUT/hits.csv`.
+
+```
+#0{max}      # most zeros
+0{max}$      # most zeros at the end
+```
+
+Every verified hit and every new record is appended to `OUT/hits.csv` (columns: time, mode, target, note, value,
+new_record, id, sha256, url, file), so a long run leaves a list you can open in a spreadsheet.
 
 Quoting: in PowerShell and bash use single quotes, because `$` starts a variable inside double quotes
 (`-m 'dead$'`). In cmd.exe `^` is the escape character: use double quotes (`-m "^0{12}"`).
@@ -175,7 +184,8 @@ them. `^` and `$` in a hex term still refer to the full 64-digit hash, as everyw
 digits. On a shape `{n}` means "a run of n digits exists" (at least n).
 
 Records: `{max}` (or `{min}`) in place of the number turns the line into a record category. It is also allowed on a
-repeated single digit of a hex pattern: `^f{max}` (most leading f's), `0{max}` (longest run of zeros),
+repeated single digit of a hex pattern: `^f{max}` (most leading f's), `0{max}` (longest run of zeros), `0{max}$`
+(most zeros at the very end; one token only, e.g. `?l{max}$`),
 `(?)\1{max}` (longest run of one digit), `~{max}`, `+{max}`, `(??)\1{max}` (longest zigzag), `#?l{max}` (most
 letters), `#?l{min}` (fewest letters), `##{min}` (fewest different digits). At most one `{max}`/`{min}` per line.
 

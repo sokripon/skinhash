@@ -487,20 +487,23 @@ export class StatTerm {
     Object.assign(this, { kind, text, width, lo, hi, rec });
     this.cset = kw.cset || 0; this.words = kw.words || null; this.period = kw.period || 0;
     this.pattern = kw.pattern || null; this.prefix = kw.prefix || null; this.tok = kw.tok || 0; this.start = !!kw.start;
+    this.end = !!kw.end;   // X{max}$: the run that ends the id
   }
+  endRun(h) { let run = 0; while (run < h.length && (this.tok >> h[h.length - 1 - run]) & 1) run++; return run; }
   finderText() { return this.text; }
   /** {max} hex term with the token repeated k times: a Pattern, "always" or null (longer than the id). */
   hexK(k) {
     const toks = [...this.prefix, ...new Array(k).fill(this.tok)];
     if (!toks.length) return "always";
     if (toks.length > this.width) return null;
-    return new Pattern(this.text, this.width, this.start, false, [toks]);
+    return new Pattern(this.text, this.width, this.start, this.end, [toks]);
   }
   /** Reference value (null: a record term whose pattern does not match). h: nibbles of the whole id, vis: the visible ones. */
   value(h, vis, hexid) {
     switch (this.kind) {
       case "hex": {
         if (!this.rec) return this.pattern.match(hexid);
+        if (this.end) return this.endRun(h);
         const s = this.start ? h : vis, pre = this.prefix;
         let best = null;
         const offs = this.start ? [0] : [...Array(Math.max(0, s.length - pre.length + 1)).keys()];
@@ -530,6 +533,7 @@ export class StatTerm {
   }
   /** The GPU value of an X{max} term (see StatTerm.gpu_hex_rec in patterns.py). */
   gpuHexRec(h, vis) {
+    if (this.end) return this.endRun(h);
     if (this.start) {
       for (let i = 0; i < this.prefix.length; i++) { const [m, v] = nibMask(this.prefix[i]); if ((h[i] & m) !== v) return null; }
       let run = 0;
@@ -585,7 +589,7 @@ export class StatTerm {
       const name = popcount(s) === 1 ? HEXDIGITS[31 - Math.clz32(s)] : ({ [LETTERS]: "l", [DIGITS]: "d", [ALL]: "all" })[s] || s.toString(16).padStart(4, "0");
       return `count${name}`;
     }
-    if (k === "hex") return "hex-" + this.text.replace("{max}", "").replace(/[^0-9a-z]+/g, "").slice(0, 12);
+    if (k === "hex") return (this.end ? "hexend-" : "hex-") + this.text.replace("{max}", "").replace(/[^0-9a-z]+/g, "").slice(0, 12);
     return ({ words: "words", distinct: "distinct", up: "up", down: "down", pal: "pal" })[k] || `run${this.period}`;
   }
 }
@@ -744,11 +748,13 @@ function parseTerm(raw, off, width) {
   if (s.split("{max}").length > 2) throw new PatternError(`two {max} in '${s}'; one per line`);
   if (s.includes("{max}")) {
     const i = s.indexOf("{max}");
-    if (s.slice(i + 5) || s.includes("*") || s.includes("$")) throw new PatternError(`'{max}' at position ${P(i)}: in a hex pattern {max} repeats the last token of a pattern without '*' or '$': ^f{max}, 0{max}, ^dead0{max}`);
+    const end = s.slice(i + 5) === "$";
+    if ((s.slice(i + 5) && !end) || s.includes("*") || s.slice(0, i).includes("$")) throw new PatternError(`'{max}' at position ${P(i)}: in a hex pattern {max} repeats the last token of a pattern without '*': ^f{max}, 0{max}, ^dead0{max}, 0{max}$`);
     let pat;
     try { pat = parseTokens(s.slice(0, i) + "{1}", width); } catch (e) { if (e instanceof PatternError) throw new PatternError(`in '${s}': ${e.message}`); throw e; }
     const pc = pat.pieces[0];
-    return new StatTerm("hex", s, width, 0, null, "max", { prefix: pc.slice(0, -1), tok: pc[pc.length - 1], start: pat.start });
+    if (end && (pat.start || pc.length !== 1)) throw new PatternError(`'{max}$' at position ${P(i)}: a run at the end takes a single token: 0{max}$, ?l{max}$`);
+    return new StatTerm("hex", s, width, 0, null, "max", { prefix: pc.slice(0, -1), tok: pc[pc.length - 1], start: pat.start, end });
   }
   let pat;
   try { pat = parseTokens(s, width); } catch (e) { if (e instanceof PatternError) throw new PatternError(`in '${s}': ${e.message}`); throw e; }

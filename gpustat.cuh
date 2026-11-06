@@ -29,7 +29,7 @@
 #define MAXSM 16
 #define FAILV (-2147483647 - 1)
 
-enum { SK_COUNT = 1, SK_DIST, SK_PER, SK_UP, SK_DOWN, SK_PAL, SK_WORDS, SK_HEXMASK, SK_HEXREC, SK_HEXRUN };
+enum { SK_COUNT = 1, SK_DIST, SK_PER, SK_UP, SK_DOWN, SK_PAL, SK_WORDS, SK_HEXMASK, SK_HEXREC, SK_HEXRUN, SK_HEXEND };
 struct StatOp { u32 kind, rec, a, b, c, d, e; };         /* c = upper bound (INT_MAX = none) */
 struct StatLineC { u32 first, n, rec, exact; };
 
@@ -255,6 +255,13 @@ template <int NW> __device__ __forceinline__ int eval_op(const StatOp &op, const
         const int run = x ? __clzll(x) : 64;
         return run > W - npre ? W - npre : run;
     }
+    case SK_HEXEND: {   /* X{max}$: digit W-1 is bit 64-W of M; count the trailing set bits from there */
+        u32 f[NW];
+        set_flags<NW>(w, op.d, f);
+        const u64 y = ~(compact_flags<NW>(f) >> (64 - W));
+        const int run = y ? __ffsll((long long)y) - 1 : 64;
+        return run > W ? W : run;
+    }
     default: {   /* SK_HEXRUN: longest run of the token set anywhere in the visible id */
         u32 f[NW];
         set_flags<NW>(w, op.d, f);
@@ -386,7 +393,9 @@ static inline bool stat_build(const std::vector<sline_t> &ls, int NWd, StatTable
                     for (int i = 0; i < 8; i++) T.masks.push_back(i < NWd ? t.pat.av[i] : 0);
                 } else {
                     op.d = t.tok;
-                    if (t.start) {
+                    if (t.end) {
+                        op.kind = SK_HEXEND;
+                    } else if (t.start) {
                         op.kind = SK_HEXREC; op.a = (u32)t.npre;
                         if (t.npre) {
                             u32 am[8] = {0}, av[8] = {0};
@@ -413,7 +422,7 @@ static inline bool stat_build(const std::vector<sline_t> &ls, int NWd, StatTable
         }
         if (lc.n == 0) { snprintf(err, (size_t)errlen, "stat line '%s' has nothing the GPU can test", L.text); return false; }
         /* sort this line's ops by cost (stable); the record op keeps working wherever it is */
-        auto cost = [](const StatOp &o) { return o.kind == SK_HEXMASK || o.kind == SK_HEXREC ? 0 : o.kind == SK_COUNT ? 1 : o.kind == SK_DIST ? 2 : o.kind == SK_WORDS ? 5 : o.kind == SK_PAL ? 6 : 3; };
+        auto cost = [](const StatOp &o) { return o.kind == SK_HEXMASK || o.kind == SK_HEXREC || o.kind == SK_HEXEND ? 0 : o.kind == SK_COUNT ? 1 : o.kind == SK_DIST ? 2 : o.kind == SK_WORDS ? 5 : o.kind == SK_PAL ? 6 : 3; };
         std::stable_sort(T.ops.begin() + lc.first, T.ops.end(), [&](const StatOp &a, const StatOp &b) { return cost(a) < cost(b); });
         T.lines.push_back(lc);
     }

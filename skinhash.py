@@ -15,6 +15,7 @@ The searches drive the native finders (hashfinder, fastfinder, gpufinder, namemc
 built with build.ps1) and verify every hit. See README.md and docs/how-it-works.md.
 """
 import argparse
+import csv
 import hashlib
 import json
 import os
@@ -24,6 +25,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import time
 import zlib
 
 from PIL import Image
@@ -287,6 +289,10 @@ def run_finder(cmd, rgba, on_hit=None, verifier=None):
                     continue
                 if ok and RECORDS:
                     RECORDS.normal.add(f)
+                if ok:
+                    kv = dict(x.split("=", 1) for x in line.split()[2:] if "=" in x)
+                    log_hit(os.path.dirname(f), 16 if verifier is verify_namemc else 64, line.split()[1], f,
+                            kv.get("sha", ""), kv.get("id", ""))
                 if ok and on_hit and on_hit(line.split()[1], f) and not asked_stop:
                     asked_stop = True
                     proc.terminate()
@@ -786,9 +792,13 @@ class RecordStore:
         dest = os.path.join(self.dir, "records", f"{pl.tag()}-{value}-{os.path.basename(path)}")
         shutil.copyfile(path, dest)
         self.drop(path)
+        note = NOTES.get((self.width, text), "")
         self.mine[text] = {"value": value, "id": idd, "file": os.path.relpath(dest, self.dir)}
+        if note:
+            self.mine[text]["note"] = note
         self.save()
-        print(f"RECORD {text}: {value} (was {'none' if old is None else old}) {idd} file={dest}", flush=True)
+        log_hit(self.dir, self.width, f"record:{text}", dest, kv.get("sha", ""), idd, value, "yes")
+        print(f"RECORD {text}{f' ({note})' if note else ''}: {value} (was {'none' if old is None else old}) {idd} file={dest}", flush=True)
         return True
 
     def drop(self, path):
@@ -811,11 +821,34 @@ class RecordStore:
         if rows:
             print("records:", flush=True)
             for t, e in rows:
-                print(f"  {t:<24} {e['value']:>4}  {e['id']}  {e['file']}", flush=True)
+                note = NOTES.get((self.width, t), e.get("note", ""))
+            print(f"  {t:<24} {e['value']:>4}  {e['id']}  {e['file']}" + (f"  # {note}" if note else ""), flush=True)
 
 
 RECORDS = None     # the RecordStore of the running search
 RESET_RECORDS = False
+NOTES = {}         # (width, pattern text as the finders see it) -> comment from its pattern file line
+HITS_CSV_COLS = ["time", "mode", "target", "note", "value", "new_record", "id", "sha256", "url", "file"]
+
+
+def log_hit(outdir, width, target, path, sha, idd, value="", new_record=""):
+    """Append one verified hit or record to OUT/hits.csv (header written on first use)."""
+    text = target.split(":", 1)[1] if ":" in target else target
+    if target.startswith("record:"):
+        text = re.sub(r"=-?\d+$", "", text)
+    url = (f"https://textures.minecraft.net/texture/{idd}" if width == 64 else f"https://namemc.com/skin/{idd}")
+    row = [time.strftime("%Y-%m-%d %H:%M:%S"), "mojang" if width == 64 else "namemc", target,
+           NOTES.get((width, text), ""), value, new_record, idd, sha, url, os.path.relpath(path, outdir)]
+    p = os.path.join(outdir, "hits.csv")
+    try:
+        new = not os.path.exists(p)
+        with open(p, "a", newline="", encoding="utf-8") as f:
+            w = csv.writer(f)
+            if new:
+                w.writerow(HITS_CSV_COLS)
+            w.writerow(row)
+    except OSError as e:
+        print(f"  (could not write {p}: {e})", flush=True)
 
 
 def split_targets(targets):
@@ -1469,6 +1502,8 @@ def targets_from(prefix, suffix, zeros, contains=None, match=None, width=64, par
                 t.append(f"{'record' if p.record else 'match'}:{p.finder_text()}")
             else:
                 t.append(f"match:{p.text}")
+            if getattr(p, "note", ""):
+                NOTES[(width, t[-1].split(":", 1)[1])] = p.note
         # the GPU tables: sliding windows share the contains table, anchored masks (NameMC: with -p/-s)
         nslide = len(contains or []) + sum(p.prefilter()["kind"] == "sliding" for p in hexp)
         nanch = sum(p.prefilter()["kind"] == "anchored" for p in hexp) + (len(prefix or []) + len(suffix or []) if width == 16 else 0)

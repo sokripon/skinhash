@@ -270,6 +270,7 @@ typedef struct {
     uint16_t cset;                  /* ST_COUNT */
     int nwords; uint8_t wlen[ST_MAXWORDS]; uint8_t word[ST_MAXWORDS][8];
     int start, npre; uint16_t pre[MPAT_MAXTOK], tok;   /* ST_HEX with {max}: prefix tokens and the repeated token */
+    int end;                                           /* X{max}$: the run that ends the id (no prefix) */
     mpat_t pat;                     /* ST_HEX threshold */
 } sterm_t;
 
@@ -403,6 +404,14 @@ static inline int st_parse_term(const char *s, const char *e, int width, sterm_t
     if (n >= sizeof buf - 3) return st_err(err, errlen, "term too long", whole);
     memcpy(buf, s, n); buf[n] = 0;
     t->kind = ST_HEX;
+    if (n > 6 && !memcmp(buf + n - 6, "{max}$", 6)) {
+        memcpy(buf + n - 6, "{1}", 4);
+        mpat_t mp;
+        if (mpat_parse(buf, width, &mp, err, errlen)) return -1;
+        if (mp.start || mp.ntok != 1) return st_err(err, errlen, "a run at the end takes a single token", whole);
+        t->rec = 1; t->end = 1; t->npre = 0; t->tok = mp.tok[0];
+        return 0;
+    }
     if (n > 5 && !memcmp(buf + n - 5, "{max}", 5)) {
         memcpy(buf + n - 5, "{1}", 4);
         mpat_t mp;
@@ -479,6 +488,11 @@ static inline int st_count_words(const uint8_t *v, int n, const sterm_t *t) {
     return total;
 }
 static inline int st_hexrec(const sterm_t *t, const uint8_t *h, int L, int zl) {
+    if (t->end) {
+        int run = 0;
+        while (run < L && (t->tok >> h[L - 1 - run] & 1)) run++;
+        return run;
+    }
     const uint8_t *s = t->start ? h : h + zl;
     int n = t->start ? L : L - zl, best = -1;
     for (int o = 0; o < (t->start ? 1 : n - t->npre + 1); o++) {

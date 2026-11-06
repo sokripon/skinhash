@@ -618,6 +618,7 @@ class StatTerm:
         self.period = kw.get("period", 0)
         self.pattern = kw.get("pattern")      # hex term
         self.prefix, self.tok, self.start = kw.get("prefix"), kw.get("tok", 0), kw.get("start", False)
+        self.end = kw.get("end", False)       # X{max}$: the run that ends the id
 
     def __repr__(self):
         return f"StatTerm({self.text!r})"
@@ -637,13 +638,22 @@ class StatTerm:
             return "always"
         if len(toks) > self.width:
             return None
-        return Pattern(self.text, self.width, self.start, False, [toks])
+        return Pattern(self.text, self.width, self.start, self.end, [toks])
+
+    def end_run(self, h):
+        """X{max}$: length of the run of the token that ends the full id."""
+        run = 0
+        while run < len(h) and self.tok >> h[len(h) - 1 - run] & 1:
+            run += 1
+        return run
 
     def value(self, h, vis):
         k = self.kind
         if k == "hex":
             if not self.rec:
                 return self.pattern.match("".join(HEXDIGITS[c] for c in h))
+            if self.end:
+                return self.end_run(h)
             s = h if self.start else vis
             pre, best = self.prefix, None
             for o in ([0] if self.start else range(len(s) - len(pre) + 1)):
@@ -682,7 +692,10 @@ class StatTerm:
 
     def gpu_hex_rec(self, h, vis):
         """The GPU value of an X{max} term: with ^ the prefix is tested by nibble masks and the run counted after it;
-        without ^ the longest run of the token anywhere in the id (the prefix is left to the host)."""
+        without ^ the longest run of the token anywhere in the id (the prefix is left to the host); X{max}$ the run that
+        ends the id."""
+        if self.end:
+            return self.end_run(h)
         if self.start:
             for i, x in enumerate(self.prefix):
                 m, v = nib_mask(x)
@@ -752,7 +765,7 @@ class StatTerm:
             name = HEXDIGITS[s.bit_length() - 1] if popcount(s) == 1 else {LETTERS: "l", DIGITS: "d", ALL: "all"}.get(s, f"{s:04x}")
             return f"count{name}"
         if k == "hex":
-            return "hex-" + re.sub(r"[^0-9a-z]+", "", self.text.replace("{max}", "")) [:12]
+            return ("hexend-" if self.end else "hex-") + re.sub(r"[^0-9a-z]+", "", self.text.replace("{max}", "")) [:12]
         return {"words": "words", "distinct": "distinct", "up": "up", "down": "down", "pal": "pal"}.get(k, f"run{self.period}")
 
 
@@ -1005,14 +1018,18 @@ def parse_term(raw, off, width, base):
         raise PatternError(f"two {{max}} in '{s}'; one per line")
     if "{max}" in s:
         i = s.index("{max}")
-        if s[i + 5:] or "*" in s or "$" in s:
+        end = s[i + 5:] == "$"
+        if (s[i + 5:] and not end) or "*" in s or "$" in s[:i]:
             raise PatternError(f"'{{max}}' at position {P(i)}: in a hex pattern {{max}} repeats the last token of a "
-                               f"pattern without '*' or '$': ^f{{max}}, 0{{max}}, ^dead0{{max}}")
+                               f"pattern without '*': ^f{{max}}, 0{{max}}, ^dead0{{max}}, 0{{max}}$")
         try:
             pat = _parse(s[:i] + "{1}", width)
         except PatternError as e:
             raise PatternError(f"in '{s}': {e}") from None
-        return StatTerm("hex", s, width, rec="max", prefix=pat.pieces[0][:-1], tok=pat.pieces[0][-1], start=pat.start)
+        if end and (pat.start or len(pat.pieces[0]) != 1):
+            raise PatternError(f"'{{max}}$' at position {P(i)}: a run at the end takes a single token: 0{{max}}$, ?l{{max}}$")
+        return StatTerm("hex", s, width, rec="max", prefix=pat.pieces[0][:-1], tok=pat.pieces[0][-1], start=pat.start,
+                        end=end)
     try:
         pat = _parse(s, width)
     except PatternError as e:
@@ -1063,9 +1080,9 @@ def split_commas(s):
     return out
 
 
-def strip_comment(line):
-    """A pattern file line without its comment. '#' starts a comment, except where it starts a count term (#0{24,},
-    ##{,9}, #@words.txt): at the start of the line or after ',' or '&', followed by a digit, ?, [, (, @ or #."""
+def split_comment(line):
+    """(pattern part, comment text) of a pattern file line. '#' starts a comment, except where it starts a count term
+    (#0{24,}, ##{,9}, #@words.txt): at the start of the line or after ',' or '&', followed by a digit, ?, [, (, @ or #."""
     i = 0
     while i < len(line):
         if line[i] == "#":
@@ -1073,15 +1090,20 @@ def strip_comment(line):
             if (not prev or prev[-1] in ",&") and nxt and nxt in HEXDIGITS + "?[(@#":
                 i += 2 if nxt == "#" else 1
                 continue
-            return line[:i]
+            return line[:i], line[i + 1:].strip()
         i += 1
-    return line
+    return line, ""
+
+
+def strip_comment(line):
+    """A pattern file line without its comment (see split_comment)."""
+    return split_comment(line)[0]
 
 
 def pattern_items(values, cwd=None):
-    """-m values -> [(label, text, base)]. A value is a pattern, a comma list, or @file (one pattern per line,
+    """-m values -> [(label, text, base, note)]. A value is a pattern, a comma list, or @file (one pattern per line,
     comments after ' #', blank lines ignored, relative paths from cwd). base: the directory #@words.txt is relative
-    to (the pattern file's directory, else cwd)."""
+    to (the pattern file's directory, else cwd). note: the comment after the pattern on its file line ('' if none)."""
     out = []
     for v in values or []:
         if v.startswith("@"):
@@ -1092,20 +1114,21 @@ def pattern_items(values, cwd=None):
                 raise PatternError(f"cannot read pattern file {v[1:]}: {e.strerror}") from None
             base = os.path.dirname(os.path.abspath(path))
             for n, line in enumerate(lines, 1):
-                line = strip_comment(line).strip()
+                line, note = split_comment(line)
+                line = line.strip()
                 if line:
-                    out += [(f"{v[1:]}:{n}", x.strip(), base) for x in split_commas(line) if x.strip()]
+                    out += [(f"{v[1:]}:{n}", x.strip(), base, note) for x in split_commas(line) if x.strip()]
         else:
             parts = split_commas(v)
             if len(parts) > 1 and any(not x.strip() for x in parts):
                 raise PatternError(f"empty pattern in the list '{v}'")
-            out += [(None, x.strip(), cwd) for x in parts]
+            out += [(None, x.strip(), cwd, "") for x in parts]
     return out
 
 
 def pattern_lines(values, cwd=None):
     """-m values -> [(label, text)] (see pattern_items)."""
-    return [(label, text) for label, text, _ in pattern_items(values, cwd)]
+    return [(label, text) for label, text, _, _ in pattern_items(values, cwd)]
 
 
 def parse_inputs(values, width, cwd=None):
@@ -1115,12 +1138,13 @@ def parse_inputs(values, width, cwd=None):
         lines = pattern_items(values, cwd)
     except PatternError as e:
         raise PatternError(str(e)) from None
-    for label, text, base in lines:
+    for label, text, base, note in lines:
         try:
             p = parse_line(text, width, base)
         except PatternError as e:
             errors.append(f"{label}: {e}" if label else str(e))
             continue
+        p.note = note
         if p.text not in seen:
             seen.add(p.text)
             pats.append(p)

@@ -434,6 +434,7 @@ with tempfile.TemporaryDirectory(prefix="skinhash_pat_words_") as tmp:
     open(os.path.join(tmp, "p.txt"), "w").write("#@words.txt{3,}\n#0{5,}  # zeros\n##{,10},~{20}\n")
     items = pt.pattern_items(["@p.txt"], cwd=tmp)
     check([x[1] for x in items] == ["#@words.txt{3,}", "#0{5,}", "##{,10}", "~{20}"], "pattern file: # starts a comment, but #0{5,} and #@file are lines")
+    check([x[3] for x in items] == ["", "zeros", "", ""], "pattern file: the comment after a line is kept as its note")
     ps = pt.parse_inputs(["@p.txt"], 64, cwd=tmp)
     check(len(ps) == 4 and ps[0].terms[0].words == [[13, 14, 10, 13], [11, 14, 14, 15], [12, 10, 15, 14]]
           and ps[0].finder_text() == "#(dead|beef|cafe){3,}", "word file relative to the pattern file, expanded for the finders")
@@ -573,6 +574,18 @@ check(ev("^f{max}", "fff1" + "0" * 60) == (True, 3) and ev("^f{max}", "1" * 64) 
 check(ev("0{max}", "00012000" + "300000" + "1" * 50) == (True, 5) and ev("0{max}", "0" * 64)[1] == 1, "0{max}: longest run of 0 in the link id (leading zeros dropped)")
 check(ev("^0{max}", "0" * 5 + "1" * 59) == (True, 5), "^0{max} counts the leading zeros of the full hash")
 check(ev("^dead0{max}", "dead000" + "1" * 57) == (True, 3) and ev("^dead0{max}", "beef" + "1" * 60)[0] is False, "^dead0{max}: prefix then a run")
+check(ev("0{max}$", "1" * 58 + "0" * 6) == (True, 6) and ev("0{max}$", "0" * 10 + "1" * 54) == (True, 0)
+      and ev("0{max}$", "0" * 64) == (True, 64) and ev("?l{max}$", "1" * 60 + "0abc") == (True, 3), "0{max}$ counts the run that ends the id")
+rng_end = random.Random(7)
+bad = 0
+for _ in range(3000):
+    h = "".join(rng_end.choice("0123456789abcdef") for _ in range(56)) + "0" * rng_end.randrange(9)
+    h = h[-64:].rjust(64, "1")
+    if ev("0{max}$", h)[1] != len(h) - len(h.rstrip("0")):
+        bad += 1
+check(bad == 0, "0{max}$ equals the trailing-zero count on 3000 ids")
+for bad_line in ("dead0{max}$", "^0{max}$", "0{max}*1$"):
+    check(err_of(bad_line) is not None, f"rejected: {bad_line}")
 check(ev("#0{3,}", "0" * 20 + "1" * 44)[0] is False and ev("#0{3,}", "000" + "1" * 3 + "0" * 3 + "1" * 55)[0] is True,
       "Mojang counts see the link id: leading zeros do not count")
 check(ev("#0{3,}", "000" + "1" * 13)[0], "NameMC counts see all 16 digits")
@@ -595,7 +608,7 @@ for line in ["#0{6,}", "#?l{,7}", "##{,12}", "+{5}", r"(?)\1{3}", r"(??)\1{2}", 
         mc = sum(sl.match(h) for h in ids) / len(ids)
         check(abs(mc - p) < 0.05 + 0.5 * p, f"odds {line} ({width} digits): calc {p:.4f} vs random ids {mc:.4f}")
 # the GPU model never rejects a match, for threshold lines and records
-LINES = ["#0{2,}", "#?l{,40}", "#?d{,30}", "##{,12}", "+{3}", "-{3}", r"(?)\1{2}", r"(??)\1{1}", "~{7}", "#(dead|beef){1,}", "^de & #0{1,}", "#f{max}", "~{max}", "##{min}"]
+LINES = ["#0{2,}", "#?l{,40}", "#?d{,30}", "##{,12}", "+{3}", "-{3}", r"(?)\1{2}", r"(??)\1{1}", "~{7}", "#(dead|beef){1,}", "^de & #0{1,}", "#f{max}", "~{max}", "##{min}", "0{max}$"]
 for width in (64, 16):
     bad = 0
     for h in rand_ids(width, 400):
@@ -633,7 +646,7 @@ int main(void) {
 }
 '''
 STAT_CASES = ["#0{3,}", "#?l{,25}", "#?d{20,}", "#[0-3]{12,}", "##{,12}", "##{min}", "+{4}", "-{3}", "+{max}", r"(?)\1{2}", r"(??)\1{1}",
-              r"(?{3})\1{max}", "~{6}", "~{max}", "#(dead|beef|a){2,}", "#(c0ffee){max}", "^f{max}", "0{max}", "^dead0{max}", "^de & #0{1,}", "#0{max}&?l{3}", "#?l{min}"]
+              r"(?{3})\1{max}", "~{6}", "~{max}", "#(dead|beef|a){2,}", "#(c0ffee){max}", "^f{max}", "0{max}", "^dead0{max}", "0{max}$", "?l{max}$", "^de & #0{1,}", "#0{max}&?l{3}", "#?l{min}"]
 if shutil.which("gcc"):
     with tempfile.TemporaryDirectory(prefix="skinhash_patc2_") as tmp:
         c, exe = os.path.join(tmp, "s.c"), os.path.join(tmp, "s.exe")
@@ -698,7 +711,7 @@ else:
 # ---- the GPU stat code against the C reference ---------------------------------------------------------------------
 GPU_LINES = ["#0{3,}", "#?l{,25}", "#?l{50,}", "#?d{20,}", "#[0-3]{12,}", "#f{max}", "#0{min}", "##{,12}", "##{min}", "+{3}", "-{3}", "+{max}", "-{max}",
              r"(?)\1{2}", r"(?)\1{max}", r"(??)\1{1}", r"(??)\1{max}", r"(?{3})\1{max}", r"(?{8})\1{1}", "~{5}", "~{9}", "~{max}",
-             "#(dead|beef|a){2,}", "#(dead|c0ffee){max}", "^f{max}", "0{max}", "^de & #0{1,}", "#0{max} & ^?l"]
+             "#(dead|beef|a){2,}", "#(dead|c0ffee){max}", "^f{max}", "0{max}", "0{max}$", "[0-7]{max}$", "^de & #0{1,}", "#0{max} & ^?l"]
 for exe_name, width in (("gpufinder", 64), ("namemcgpu", 16)):
     exe = os.path.join(HERE, exe_name + ".exe")
     if not os.path.exists(exe):

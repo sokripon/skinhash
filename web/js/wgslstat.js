@@ -62,6 +62,14 @@ fn lng_run(m: vec2<u32>) -> u32 {
   return len;
 }
 fn clz64(v: vec2<u32>) -> u32 { return select(32u + countLeadingZeros(v.y), countLeadingZeros(v.x), v.x != 0u); }
+fn end_run(v: vec2<u32>) -> u32 {   // set bits from bit ${64 - width} (the last digit) upwards, at most ${width}
+  let sh = ${64 - width}u;
+  var lo = v.y; var hi = v.x;
+  if (sh >= 32u) { lo = v.x >> (sh - 32u); hi = 0u; } else if (sh > 0u) { lo = (v.y >> sh) | (v.x << (32u - sh)); hi = v.x >> sh; }
+  var r = countTrailingZeros(~lo);
+  if (r == 32u) { r = 32u + countTrailingZeros(~hi); }
+  return min(r, ${width}u);
+}
 fn pmask(k: u32) -> u32 { return select(select(~(0xFFFFFFFFu >> (4u * k)), 0u, k == 0u), 0xFFFFFFFFu, k >= 8u); }
 fn nib_at(x: ptr<function, ${arr}>, i: u32) -> u32 { return ((*x)[i >> 3u] >> (28u - 4u * (i & 7u))) & 15u; }
 fn pal_len(x: ptr<function, ${arr}>, zl: u32, c: u32, odd: bool) -> u32 {
@@ -144,7 +152,7 @@ export function statCode(lines, words, { zl, SE, rbIdx = (ri) => `${ri}u` }) {
           pre = `if ((${terms.join(" | ")}) == 0u) {`;
         } else pre = "{";
         const M = mask64((k) => setFlags(t.tok, X(k)));
-        const val = t.start ? `clz64(~shl64(${M}, ${P}u))` : "lng_run(" + M + " & vis)";
+        const val = t.end ? `end_run(${M})` : t.start ? `clz64(~shl64(${M}, ${P}u))` : "lng_run(" + M + " & vis)";
         return `${pre} let v = ${val}; ${claim(line, recIdx, "v")} }`;
       }
       case "count": {

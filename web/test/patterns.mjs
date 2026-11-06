@@ -81,7 +81,7 @@ for (const [t, want] of [["#", "count what"], ["#0", "missing range"], ["#0{3", 
   ["##{max}", "nearly every id"], ["+{min}", "{min} is only for counts"], ["~{3,5}", "takes {n}"], ["~{1}", "always holds"], ["~{65}", "needs 65 digits"],
   ["(?)\\2{3}", "only the periodic-run form"], ["(?)", "only the periodic-run form"], ["(?{9})\\1{2}", "period 9"], ["(?{0})\\1{2}", "period 0"], ["(?)\\1{0}", "at least 1"],
   ["#0{3}{4}", "after the range"], ["#(xyz){3,}", "hex words"], ["#(deadbeefc){3,}", "1-8 digits"], ["#@words.txt{4,}", "write the words in the line"],
-  ["#0{max} & #1{max}", "at most one"], ["^dead & ", "empty term"], ["0{min}", "{min} is only"], ["^f{max}$", "{max} repeats"], ["a{2,3}", "ranges are for counts"],
+  ["#0{max} & #1{max}", "at most one"], ["^dead & ", "empty term"], ["0{min}", "{min} is only"], ["^f{max}$", "a run at the end takes a single token"], ["0{max}*1", "{max} repeats"], ["a{2,3}", "ranges are for counts"],
   ["#0{0,}", "always holds"], ["#0{70,}", "can never hold"], ["##{20,}", "can never hold"], ["#0{3,} & & #1{3,}", "empty term"], ["#dead{3,}", "write #("]]) {
   const e = errOf(t);
   check(e !== null && e.includes(want), `stat error for '${t}': ${e}`);

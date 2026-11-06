@@ -765,7 +765,7 @@ class StatTerm:
             name = HEXDIGITS[s.bit_length() - 1] if popcount(s) == 1 else {LETTERS: "l", DIGITS: "d", ALL: "all"}.get(s, f"{s:04x}")
             return f"count{name}"
         if k == "hex":
-            return ("hexend-" if self.end else "hex-") + re.sub(r"[^0-9a-z]+", "", self.text.replace("{max}", "")) [:12]
+            return ("hexend-" if self.end else "hexstart-" if self.start else "hex-") + re.sub(r"[^0-9a-z]+", "", self.text.replace("{max}", "")) [:12]
         return {"words": "words", "distinct": "distinct", "up": "up", "down": "down", "pal": "pal"}.get(k, f"run{self.period}")
 
 

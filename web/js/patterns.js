@@ -589,7 +589,7 @@ export class StatTerm {
       const name = popcount(s) === 1 ? HEXDIGITS[31 - Math.clz32(s)] : ({ [LETTERS]: "l", [DIGITS]: "d", [ALL]: "all" })[s] || s.toString(16).padStart(4, "0");
       return `count${name}`;
     }
-    if (k === "hex") return (this.end ? "hexend-" : "hex-") + this.text.replace("{max}", "").replace(/[^0-9a-z]+/g, "").slice(0, 12);
+    if (k === "hex") return (this.end ? "hexend-" : this.start ? "hexstart-" : "hex-") + this.text.replace("{max}", "").replace(/[^0-9a-z]+/g, "").slice(0, 12);
     return ({ words: "words", distinct: "distinct", up: "up", down: "down", pal: "pal" })[k] || `run${this.period}`;
   }
 }

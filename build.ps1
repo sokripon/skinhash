@@ -13,11 +13,12 @@ if ($LASTEXITCODE) { throw "namemcfinder build failed" }
 
 if ($NoGpu) { return }
 Write-Host "== gpufinder / namemcgpu (nvcc, sm_120)"
-$nvcc = Get-Command nvcc -ErrorAction SilentlyContinue
-if ($nvcc) { $nvcc = $nvcc.Source } else {
-    $nvcc = Get-ChildItem "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\*\bin\nvcc.exe" -ErrorAction SilentlyContinue |
-        Sort-Object FullName -Descending | Select-Object -First 1 -ExpandProperty FullName
-}
+# Newest installed toolkit first: CUDA 12.8's ptxas ran for 40+ minutes on the stat kernels without finishing; 13.0 builds them.
+$nvcc = Get-ChildItem "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v*\bin\nvcc.exe" -ErrorAction SilentlyContinue |
+    Sort-Object { [version]($_.FullName -replace '.*\\CUDA\\v([\d.]+)\\.*', '$1') } -Descending |
+    Select-Object -First 1 -ExpandProperty FullName
+if (-not $nvcc) { $c = Get-Command nvcc -ErrorAction SilentlyContinue; if ($c) { $nvcc = $c.Source } }
+if ($nvcc) { Write-Host "using $nvcc" }
 if (-not $nvcc) { Write-Warning "nvcc not found, skipping gpufinder and namemcgpu"; return }
 $vcvars = Get-ChildItem "C:\Program Files\Microsoft Visual Studio\2022\*\VC\Auxiliary\Build\vcvars64.bat" -ErrorAction SilentlyContinue |
     Select-Object -First 1 -ExpandProperty FullName

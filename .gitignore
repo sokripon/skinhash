@@ -1,4 +1,10 @@
-# build outputs (rebuild with build.ps1)
+# build outputs (rebuild with build.ps1 or build.sh)
+/fastfinder
+/hashfinder
+/namemcfinder
+/gpufinder
+/namemcgpu
+/namemccollide
 *.exe
 *.exp
 *.lib
@@ -22,3 +28,6 @@ node_modules/
 skins/*
 !skins/steve.png
 keep/
+
+# local Python environment (modal client)
+.venv/

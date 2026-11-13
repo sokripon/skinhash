@@ -833,7 +833,8 @@ else:
         with tempfile.TemporaryDirectory(prefix="skinhash_pat_rec_", ignore_cleanup_errors=True) as tmp:
             out = reuse or os.path.join(tmp, "out")
             cmd = [sys.executable, "-u", os.path.join(HERE, "skinhash.py"), group, steve, *sum([["-m", x] for x in lines], []), "-o", out, *cpu_args(extra_args)]
-            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, cwd=tmp)
+            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, cwd=tmp,
+                                    start_new_session=os.name != "nt")
             recs, t0 = [], time.time()
             import threading
             def pump():
@@ -844,7 +845,11 @@ else:
             th.start()
             while time.time() - t0 < secs and len(recs) < want and proc.poll() is None:
                 time.sleep(0.5)
-            subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], capture_output=True)
+            if os.name == "nt":
+                subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], capture_output=True)
+            else:                       # the whole process group: skinhash.py and its finder
+                import signal
+                os.killpg(proc.pid, signal.SIGKILL)
             proc.wait()
             th.join(timeout=5)
             files = [m.group(1) for r in recs for m in [re.search(r"file=(.*)$", r)] if m]

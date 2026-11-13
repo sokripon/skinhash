@@ -1,0 +1,9 @@
+# only the sources and the example skin go into the build context (not your skins, keep/, found/ or .exe builds)
+*
+!*.c
+!*.cu
+!*.cuh
+!*.h
+!*.py
+!build.sh
+!skins/steve.png

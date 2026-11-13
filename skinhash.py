@@ -598,6 +598,7 @@ def verify_namemc(base_rgba, found_path, nk=NAMEMC_KNOBS, want=None):
 
 # ---- shared helpers ----------------------------------------------------------------------------
 EXT = ".exe" if os.name == "nt" else ""
+FOUND = os.environ.get("SKINHASH_FOUND") or os.path.join(HERE, "found")   # default output folder (the container sets /work/found)
 SKIN_URL = "https://textures.minecraft.net/texture/"
 NM_URL = "https://namemc.com/skin/"
 
@@ -911,7 +912,7 @@ def mojang_search(path, targets, count=1, every=False, engine="auto", no_generic
     kp = [p for p in knob_pixels(rgba, unused_only) if p not in wm]
     offs, used = knob_offsets(kp)
     name = os.path.splitext(os.path.basename(path))[0]
-    outdir = out or os.path.join(HERE, "found", name)
+    outdir = out or os.path.join(FOUND, name)
     os.makedirs(outdir, exist_ok=True)
     work = pending_dir(outdir)
     rawp = os.path.join(work, "base.raw")
@@ -991,7 +992,7 @@ def namemc_search(path, targets, count=1, every=False, engine="auto", unused_onl
         i = (y * W + x) * 4
         rgba[i:i + 4] = b"\x00\x00\x00\x01"
     name = os.path.splitext(os.path.basename(path))[0]
-    outdir = out or os.path.join(HERE, "found", name + "_namemc")
+    outdir = out or os.path.join(FOUND, name + "_namemc")
     os.makedirs(outdir, exist_ok=True)
     work = pending_dir(outdir)
     rgbap = os.path.join(work, "base.rgba")
@@ -1102,7 +1103,7 @@ def collide_search(path, ids_path, self_mode=False, out=None, watermark=True, se
         i = (y * W + x) * 4
         rgba[i:i + 4] = b"\x00\x00\x00\x01"
     name = os.path.splitext(os.path.basename(path))[0]
-    outdir = out or os.path.join(HERE, "found", name + "_collide")
+    outdir = out or os.path.join(FOUND, name + "_collide")
     os.makedirs(outdir, exist_ok=True)
     rgbap = os.path.join(outdir, "base.rgba")
     with open(rgbap, "wb") as f:
@@ -1566,7 +1567,7 @@ def check_search_options(parser, args, has_target,
 def default_out(args, suffix=""):
     if args.out:
         return os.path.abspath(args.out)
-    return os.path.join(HERE, "found", os.path.splitext(os.path.basename(args.skin))[0] + suffix)
+    return os.path.join(FOUND, os.path.splitext(os.path.basename(args.skin))[0] + suffix)
 
 
 def set_reset(args):

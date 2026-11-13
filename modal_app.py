@@ -1,6 +1,6 @@
 """Run a skinhash search on a cloud GPU at modal.com. Instructions, GPU choice and prices: docs/modal.md
 
-Setup (once):  pip install modal  &&  modal setup
+Setup (once):  uv tool install modal  &&  modal setup
 Run:           modal run --detach modal_app.py [--gpu L40S] [--hours 23] SKINHASH ARGS...
   e.g.         modal run --detach modal_app.py --gpu L40S --hours 6 namemc skins/me.png -m @keep/records_namemc.txt -o found/nm_me
 Results:       modal run modal_app.py download found/nm_me        (copies the cloud folder into found/nm_me)

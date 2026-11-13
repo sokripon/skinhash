@@ -7,12 +7,12 @@ the finders are built in Modal's cloud with [`build.sh`](../build.sh).
 ## Setup
 
 ```
-pip install modal
+uv tool install modal
 modal setup          # opens the browser to log in; or: modal token set --token-id ... --token-secret ...
 ```
 
-A project environment works too: `uv venv .venv`, `uv pip install --python .venv modal`, then run
-`.venv\Scripts\modal` (Windows) or `.venv/bin/modal` instead of `modal`. `.venv/` is gitignored.
+`uv tool install` puts the `modal` command on your PATH in its own environment; `uv tool upgrade modal`
+updates it. Without installing: `uvx modal run ...`.
 
 ## Usage
 

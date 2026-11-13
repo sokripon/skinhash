@@ -29,5 +29,3 @@ skins/*
 !skins/steve.png
 keep/
 
-# local Python environment (modal client)
-.venv/

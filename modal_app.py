@@ -1,10 +1,10 @@
-"""Run a skinhash search on a cloud GPU at modal.com.
+"""Run a skinhash search on a cloud GPU at modal.com. Instructions, GPU choice and prices: docs/modal.md
 
 Setup (once):  pip install modal  &&  modal setup
 Run:           modal run --detach modal_app.py [--gpu L40S] [--hours 23] SKINHASH ARGS...
-  e.g.         modal run --detach modal_app.py --gpu H100 --hours 6 namemc skins/me.png -m @keep/records_namemc.txt -o found/nm_me
+  e.g.         modal run --detach modal_app.py --gpu L40S --hours 6 namemc skins/me.png -m @keep/records_namemc.txt -o found/nm_me
 Results:       modal run modal_app.py download found/nm_me        (copies the cloud folder into found/nm_me)
-Benchmark:     modal run modal_app.py --gpu B200 bench               (10 s per engine, to compare GPU types)
+Benchmark:     modal run modal_app.py --gpu RTX-PRO-6000 bench --engine gpu   (10 s, to compare GPU types)
 
 SKINHASH ARGS are the normal skinhash.py arguments. Local files in them (the skin, @pattern files and the
 @word lists those name) are uploaded with the run. -o DIR becomes the folder DIR's last part on the
@@ -12,7 +12,7 @@ SKINHASH ARGS are the normal skinhash.py arguments. Local files in them (the ski
 uploaded first, so a cloud run continues the records of a local one.
 --detach keeps the search running when this terminal closes. It stops after --hours (Modal's limit is 24 h);
 records are saved as they are found, so start it again to go on.
-GPUs: T4 is not supported; A10, L4, L40S, A100, H100, H200, B200 are (prices: modal.com/pricing).
+GPUs: T4, L4, A10, L40S, RTX-PRO-6000, A100, H100, H200, B200 (which to pick: docs/modal.md).
 """
 import os
 import re
@@ -58,7 +58,8 @@ def search(args, files, hours):
         with open(p, "wb") as f:
             f.write(data)
     subprocess.run(["nvidia-smi", "--query-gpu=name,memory.total", "--format=csv,noheader"])
-    proc = subprocess.Popen([sys.executable, "-u", "skinhash.py", *args], cwd="/app", start_new_session=True)
+    proc = subprocess.Popen([sys.executable, "-u", "skinhash.py", *args], cwd="/app", start_new_session=True,
+                            env={**os.environ, "SKINHASH_FOUND": "/found"})   # no -o: still on the volume
 
     def commit_loop():          # saved results reach the volume even if the container is stopped abruptly
         while proc.poll() is None:

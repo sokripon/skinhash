@@ -8,8 +8,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends gcc libc6-dev z
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY *.c *.cu *.cuh *.h build.sh ./
-# sm_80 A100, sm_86 RTX 30/A10, sm_89 RTX 40/L4/L40S, sm_90 H100/H200, sm_100 B200, sm_120 RTX 50
-ARG CUDA_ARCHS="80 86 89 90 100 120"
+# sm_75 T4/RTX 20, sm_80 A100, sm_86 RTX 30/A10, sm_89 RTX 40/L4/L40S, sm_90 H100/H200, sm_100 B200, sm_120 RTX 50
+ARG CUDA_ARCHS="75 80 86 89 90 100 120"
 # x86-64-v3 (AVX2, any CPU since ~2015): the image also runs on machines other than the one that built it
 ARG MARCH=x86-64-v3
 RUN CUDA_ARCHS="$CUDA_ARCHS" MARCH="$MARCH" sh build.sh

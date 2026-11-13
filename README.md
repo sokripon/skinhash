@@ -480,41 +480,9 @@ docker run --rm --gpus all skinhash bench
 
 ## Cloud GPU (Modal)
 
-`modal_app.py` runs a search on a rented GPU at [modal.com](https://modal.com). On Linux, `build.sh` builds the
-finders (`CUDA_ARCHS="90" sh build.sh` for one GPU architecture), and the Modal image runs it once.
-
-```
-pip install modal
-modal setup                                          # log in once
-modal run modal_app.py --gpu L40S bench              # 10 s benchmark: compare GPU types before a long run
-modal run --detach modal_app.py --gpu H100 --hours 6 namemc skins/me.png -m @keep/records_namemc.txt -o found/nm_me
-modal run modal_app.py download found/nm_me         # copy the results into found/nm_me
-```
-
-- Everything after `--gpu`/`--hours` is passed to `skinhash.py`. The skin, `@pattern` files and the `@word` lists
-  they name are uploaded with the run.
-- `-o DIR` becomes the folder named like DIR's last part on the `skinhash-found` Modal volume. If the local DIR
-  has a `records.json` and the cloud folder has none, it is uploaded first, so the cloud run keeps the local
-  records. `download` merges back: `records.json` keeps the better value of each line and `hits.csv` gets the
-  rows it is missing. Other files are copied.
-- `--detach` keeps the run going after the terminal closes. The run stops after `--hours` (default 23; Modal
-  allows at most 24 h per run). Records are saved as they are found, so starting it again continues.
-- Measured with `bench --engine gpu` on the example skin (November 2026; prices from modal.com/pricing, GPU only,
-  the 4 CPU cores add about $0.19/h). Speed per dollar is in trillions of candidates per dollar:
-
-  | GPU | $/h | Mojang | NameMC | Mojang T/$ | NameMC T/$ |
-  |---|---|---|---|---|---|
-  | L40S | 1.95 | 17.3 G/s | 11.2 G/s | 31.9 | 20.6 |
-  | RTX PRO 6000 | 3.03 | 21.7 G/s | 14.4 G/s | 25.7 | 17.0 |
-  | H100 | 3.95 | 13.5 G/s | 8.9 G/s | 12.3 | 8.1 |
-  | B200 | 6.25 | 14.8 G/s | 10.1 G/s | 8.5 | 5.8 |
-  | RTX 5060 Ti (local, for comparison) | | 5.1 G/s | 3.3 G/s | | |
-
-  The data-center cards (H100, B200) run integer code on half their cores at lower clocks, so they are slow for
-  SHA-256. The L40S gives the most per dollar, and the RTX PRO 6000 is the fastest single GPU.
-
-- Supported GPUs: A10, L4, L40S, A100, H100, H200 and B200 (T4 is too old for CUDA 13). The first run builds
-  the image, which takes a while because gpufinder compiles for each architecture. Later runs reuse it.
+`modal_app.py` runs a search on a rented GPU at [modal.com](https://modal.com), with no GPU or CUDA needed
+locally. An L40S is about 3.4x as fast as an RTX 5060 Ti. Setup, usage, GPU choice and prices are in
+[docs/modal.md](docs/modal.md).
 
 ## NameMC mode
 

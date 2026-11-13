@@ -15,8 +15,8 @@ done
 [ "$1" = "--no-gpu" ] && exit 0
 NVCC="$(command -v nvcc || echo /usr/local/cuda/bin/nvcc)"
 [ -x "$NVCC" ] || { echo "nvcc not found, skipping gpufinder and namemcgpu"; exit 0; }
-# sm_80 A100, sm_86 A10/RTX 30, sm_89 L4/L40S/RTX 40, sm_90 H100/H200, sm_100 B200, sm_120 RTX 50
-ARCHS="${CUDA_ARCHS:-80 86 89 90 100 120}"
+# sm_75 T4/RTX 20, sm_80 A100, sm_86 A10/RTX 30, sm_89 L4/L40S/RTX 40, sm_90 H100/H200, sm_100 B200, sm_120 RTX 50
+ARCHS="${CUDA_ARCHS:-75 80 86 89 90 100 120}"
 GENCODE=""
 for a in $ARCHS; do GENCODE="$GENCODE -gencode arch=compute_$a,code=sm_$a"; done
 echo "== gpufinder / namemcgpu ($NVCC, sm: $ARCHS)"

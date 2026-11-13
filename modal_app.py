@@ -3,6 +3,7 @@
 Setup (once):  uv tool install modal  &&  modal setup
 Run:           modal run --detach modal_app.py [--gpu L40S] [--hours 23] SKINHASH ARGS...
   e.g.         modal run --detach modal_app.py --gpu L40S --hours 6 namemc skins/me.png -m @keep/records_namemc.txt -o found/nm_me
+Status:        modal run modal_app.py status found/nm_me          (records and hits so far, read from the cloud)
 Results:       modal run modal_app.py download found/nm_me        (copies the cloud folder into found/nm_me)
 Benchmark:     modal run modal_app.py --gpu RTX-PRO-6000 bench --engine gpu   (10 s, to compare GPU types)
 
@@ -140,6 +141,10 @@ def main(*argv):
         if len(argv) != 2:
             sys.exit("usage: modal run modal_app.py download DIR")
         return download(argv[1])
+    if argv[0] == "status":
+        if len(argv) != 2:
+            sys.exit("usage: modal run modal_app.py status DIR")
+        return status(argv[1])
     if not 0 < hours <= 23.9:
         sys.exit("--hours must be more than 0 and at most 23.9 (Modal stops a run after 24 h)")
     args, files, out = map_args(argv)
@@ -152,6 +157,48 @@ def main(*argv):
     print(f"gpu={gpu} hours={hours} skinhash.py {' '.join(args)}")
     rc = search.with_options(gpu=gpu).remote(args, files, hours)
     print(f"finished (exit {rc})." + (f" Get the results: modal run modal_app.py download {out}" if out else ""))
+
+
+def read_cloud(path):
+    import io
+    buf = io.BytesIO()
+    try:
+        volume.read_file_into_fileobj(path, buf)
+    except Exception:           # not there (yet)
+        return None
+    return buf.getvalue().decode("utf-8")
+
+
+def status(out):
+    """Records and hits of the cloud folder named like OUT's last part, read from the volume (nothing downloaded).
+    '+' marks a record that is better than the local OUT/records.json, so a download would bring it."""
+    import json
+    name = os.path.basename(os.path.normpath(out))
+    text = read_cloud(f"/{name}/records.json")
+    if text is None:
+        sys.exit(f"no records.json in the cloud folder {name} (yet)")
+    try:
+        with open(os.path.join(out, "records.json"), encoding="utf-8") as f:
+            local = json.load(f)
+    except (OSError, ValueError):
+        local = {}
+    import patterns as pt
+    for group, lines in json.loads(text).items():
+        width = 64 if group == "mojang" else 16
+        print(f"{group} records in the cloud ({name}):")
+        for line, e in lines.items():
+            old = local.get(group, {}).get(line)
+            try:
+                new = old is None or pt.parse_line(line, width).beats(e["value"], old["value"])
+            except Exception:
+                new = old is None
+            label = line if len(line) <= 28 else line[:25] + "..."
+            print(f" {'+' if new else ' '} {label:<28} {e['value']:>4}  {e['id']}  {e.get('note', '')}")
+    hits = read_cloud(f"/{name}/hits.csv")
+    if hits:
+        rows = hits.strip().splitlines()[1:]
+        print(f"{len(rows)} hits/records logged, the last at {rows[-1].split(',')[0]} UTC" if rows else "no hits yet")
+    print("+ = better than your local copy; get them with: modal run modal_app.py download " + out)
 
 
 def cloud_has(path):

@@ -19,6 +19,7 @@ updates it. Without installing: `uvx modal run ...`.
 ```
 modal run modal_app.py --gpu L40S bench --engine gpu      # 10 s benchmark
 modal run --detach modal_app.py --gpu L40S --hours 6 namemc skins/me.png -m @keep/records_namemc.txt -o found/nm_me
+modal run modal_app.py status found/nm_me                 # records and hits so far, nothing downloaded
 modal run modal_app.py download found/nm_me               # copy the results into found/nm_me
 ```
 
@@ -39,6 +40,9 @@ modal run modal_app.py download found/nm_me               # copy the results int
   becomes `nm_me`. Without `-o`, the folder is named after the skin, as in a local run.
 - Continuing a local search: if the local DIR has a `records.json` and the cloud folder has none yet, it is
   uploaded first, so the cloud run starts from your local best values.
+- `status DIR` reads the cloud `records.json` and `hits.csv` while a run is going or after it. It shows every
+  record with its id and note, and marks with `+` the ones that are better than your local copy.
+- `modal app list` shows whether a run is still going; `modal app logs skinhash` follows its output.
 - `download DIR` copies the cloud folder into DIR. It merges instead of overwriting: `records.json` keeps
   the better value of each record line from both sides, and `hits.csv` gets the rows it is missing. Hit skins
   and `records/` files are copied.

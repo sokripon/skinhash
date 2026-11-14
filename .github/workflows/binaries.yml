@@ -1,0 +1,132 @@
+# Builds the finders for Windows and Linux (x64) and packs them with the Python CLI: skinhash-windows-x64.zip and
+# skinhash-linux-x64.tar.gz. Portable builds: CPU code for x86-64-v3 (AVX2, any CPU since ~2015) and GPU code for
+# sm_75 T4/RTX 20, sm_80 A100, sm_86 RTX 30, sm_89 RTX 40/L4/L40S, sm_90 H100, sm_100 B200, sm_120 RTX 50.
+# Every run keeps them as workflow artifacts; a version tag (v1.2.3) also attaches them to a GitHub release.
+name: Binaries
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+    paths:
+      - "*.c"
+      - "*.cu"
+      - "*.cuh"
+      - "*.h"
+      - "build.sh"
+      - ".github/workflows/binaries.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write   # attach the archives to a release on tags
+
+concurrency:
+  group: binaries-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CUDA_ARCHS: "75 80 86 89 90 100 120"
+  MARCH: x86-64-v3
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    # Ubuntu 22.04 (glibc 2.35): the binaries also run on older distributions than a 24.04 build would
+    container: nvidia/cuda:13.0.0-devel-ubuntu22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tools
+        run: apt-get update && apt-get install -y --no-install-recommends gcc libc6-dev zlib1g-dev
+      - name: Build
+        run: sh build.sh
+      - name: Pack
+        run: |
+          mkdir -p dist/skinhash/skins
+          cp fastfinder hashfinder namemcfinder gpufinder namemcgpu *.py README.md dist/skinhash/
+          cp skins/steve.png dist/skinhash/skins/
+          for f in LICENSE*; do [ -e "$f" ] && cp "$f" dist/skinhash/; done
+          tar -C dist -czf skinhash-linux-x64.tar.gz skinhash
+      - uses: actions/upload-artifact@v4
+        with:
+          name: skinhash-linux-x64
+          path: skinhash-linux-x64.tar.gz
+
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 180
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+      # gcc and a static zlib for the CPU finders (no DLLs next to the .exe files)
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          install: mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-zlib
+      - name: CPU finders (gcc, static)
+        shell: msys2 {0}
+        run: |
+          for f in fastfinder hashfinder namemcfinder; do
+            gcc -O3 -march="$MARCH" -Wall -Wextra -static -o "$f.exe" "$f.c" -lz -lpthread
+          done
+      # nvcc from NVIDIA's redistributable archives: only the parts needed, no installer
+      - name: CUDA 13.0 (nvcc, cudart, crt, nvvm, cccl)
+        run: |
+          $base = "https://developer.download.nvidia.com/compute/cuda/redist"
+          $j = Invoke-RestMethod "$base/redistrib_13.0.0.json"
+          $cuda = "$env:RUNNER_TEMP\cuda"
+          New-Item -ItemType Directory $cuda | Out-Null
+          foreach ($c in "cuda_nvcc", "cuda_cudart", "cuda_crt", "libnvvm", "cuda_cccl") {
+            $zip = "$env:RUNNER_TEMP\$c.zip"
+            Invoke-WebRequest "$base/$($j.$c.'windows-x86_64'.relative_path)" -OutFile $zip
+            Expand-Archive $zip "$env:RUNNER_TEMP\x_$c"
+            $top = Get-ChildItem "$env:RUNNER_TEMP\x_$c" -Directory | Select-Object -First 1
+            Copy-Item "$($top.FullName)\*" $cuda -Recurse -Force
+          }
+          "$cuda\bin" | Out-File -Append $env:GITHUB_PATH
+          "CUDA_PATH=$cuda" | Out-File -Append $env:GITHUB_ENV
+      - uses: ilammy/msvc-dev-cmd@v1
+      - name: GPU finders (nvcc + MSVC, both at once)
+        run: |
+          nvcc --version
+          $gencode = ($env:CUDA_ARCHS -split " " | ForEach-Object { "-gencode=arch=compute_$_,code=sm_$_" })
+          # newer runner images can carry an MSVC that this nvcc does not list yet
+          $common = @("-O3", "-allow-unsupported-compiler") + $gencode
+          $jobs = foreach ($f in "gpufinder", "namemcgpu") {
+            Start-Process nvcc -ArgumentList ($common + @("-o", "$f.exe", "$f.cu")) -NoNewWindow -PassThru `
+              -RedirectStandardOutput "$f.out.log" -RedirectStandardError "$f.err.log"
+          }
+          $jobs | Wait-Process
+          $bad = 0
+          foreach ($f in "gpufinder", "namemcgpu") {
+            Get-Content "$f.out.log", "$f.err.log"
+            if (-not (Test-Path "$f.exe")) { Write-Error "$f build failed"; $bad = 1 }
+          }
+          exit $bad
+      - name: Pack
+        run: |
+          New-Item -ItemType Directory dist\skinhash\skins -Force | Out-Null
+          Copy-Item fastfinder.exe, hashfinder.exe, namemcfinder.exe, gpufinder.exe, namemcgpu.exe, *.py, README.md dist\skinhash\
+          Copy-Item skins\steve.png dist\skinhash\skins\
+          if (Test-Path LICENSE*) { Copy-Item LICENSE* dist\skinhash\ }
+          Compress-Archive dist\skinhash skinhash-windows-x64.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: skinhash-windows-x64
+          path: skinhash-windows-x64.zip
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [linux, windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            skinhash-windows-x64.zip
+            skinhash-linux-x64.tar.gz

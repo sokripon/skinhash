@@ -15,7 +15,12 @@ that re-encode, so those bytes are free knobs.
 
 ## Usage
 
-Build the finders once (`powershell -File build.ps1`, `-NoGpu` to skip CUDA), then:
+Build the finders once (`powershell -File build.ps1`, `-NoGpu` to skip CUDA; on Linux `sh build.sh`), or take the
+prebuilt ones: `skinhash-windows-x64.zip` / `skinhash-linux-x64.tar.gz` from the
+[releases](https://github.com/sokripon/skinhash/releases) (or the artifacts of the latest
+[Binaries run](https://github.com/sokripon/skinhash/actions/workflows/binaries.yml)). They run on any x64 CPU with
+AVX2 and every NVIDIA GPU from the RTX 20 / T4 on (driver 580+), and need Python 3 with Pillow
+(`uv pip install pillow`). Then:
 
 ```
 py skinhash.py mojang skins/me.png -p c0ffee        # Mojang link starting with c0ffee

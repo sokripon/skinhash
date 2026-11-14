@@ -249,9 +249,10 @@ def run_finder(cmd, rgba, on_hit=None, verifier=None):
     """Run a finder and verify its hits. Ctrl+C ends the whole search, never a fallback.
     If on_hit(why, path) returns True the finder is stopped; the rest of its output is
     still verified and STOPPED_BY_US is returned."""
-    global LAST_ROLLOVER, LAST_RATE
+    global LAST_ROLLOVER, LAST_RATE, RATE_NOW
     if RECORDS:   # start values of the record lines: the best so far (also after a rollover or a CPU fallback)
         cmd = strip_best(cmd) + RECORDS.best_args()
+    intervals = 0   # progress lines of this finder; the first interval includes start-up and is not used
     # stderr (progress lines) is merged in so it can be reformatted
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     asked_stop = False
@@ -264,13 +265,15 @@ def run_finder(cmd, rgba, on_hit=None, verifier=None):
                 if not raw.split()[1].startswith("record:"):
                     line = raw.replace(src, moved.get(src, final_path(src)))   # where the hit will be kept
             print(pretty_progress(line), end="", flush=True)
-            if ODDS and not ODDS.get("shown"):
-                m = PROGRESS_RE.match(line)
-                if m and int(m.group(3)) > 0:
-                    ODDS["shown"] = True
-                    rate = int(m.group(3))
-                    print(f"expected time at the measured {pt.fmt_rate(rate)}: " + "; ".join(
-                        f"{t} {pt.fmt_eta(p, rate)}" for t, p in ODDS["targets"]), flush=True)
+            m = PROGRESS_RE.match(line)
+            if m and int(m.group(3)) > 0:
+                intervals += 1
+                r = int(m.group(3))   # rate of the last interval
+                if intervals >= 2:   # smoothed, so one slow interval (a record being saved) does not swing it
+                    RATE_NOW = r if RATE_NOW is None else 0.7 * RATE_NOW + 0.3 * r
+                    if ODDS and not ODDS.get("shown"):
+                        ODDS["shown"] = True
+                        show_measured(RATE_NOW)
             if line.startswith("RATE "):
                 try:
                     LAST_RATE = float(line.split()[1])
@@ -663,10 +666,65 @@ NOMINAL = {("mojang", "gpu"): 4.8e9, ("mojang", "cpu"): 4.8e7, ("mojang", "gener
            ("namemc", "cpu-unused"): 6.8e6}
 
 
+RATE_NOW = None   # measured candidates/s of the running search (smoothed; None until the first warm interval)
+
+
+def strip_estimate(note):
+    """A pattern file comment without a hand-written '[next N: ~T]' estimate (the program computes that now)."""
+    return re.sub(r"\s*\[[^\]]*\]\s*$", "", note or "")
+
+
+def record_next(text):
+    """(next value or None, probability of beating the current best) of a record line of the running search."""
+    pl, best = RECORDS.lines[text], RECORDS.best(text)
+    p = pt.target_probability("record:" + text, RECORDS.width, best)
+    if best is None:
+        return None, p
+    term = pl.rec_term
+    step = term.period if term.kind == "period" else 1
+    return (best + step if term.rec == "max" else best - step), p
+
+
+def record_eta(text, rate=None):
+    """'next 13: ~1 in 4.5e15, ~46 days at 1.12 G/s' for a record line (no time before the rate is measured)."""
+    rate = rate or RATE_NOW
+    nxt, p = record_next(text)
+    if nxt is None:
+        return "no best yet (the first id is a record)"
+    s = f"next {nxt}: {pt.fmt_odds(p)}"
+    return s + (f", {pt.fmt_eta(p, rate)} at {pt.fmt_rate(rate)}" if rate else "")
+
+
+def show_measured(rate):
+    """The odds table again, now with times at the measured rate (record lines use their current best)."""
+    print(f"expected time at the measured {pt.fmt_rate(rate)} (this search, these lines):", flush=True)
+    w = max(len(t) for t, _ in ODDS["targets"])
+    for t, p in ODDS["targets"]:
+        if t.startswith("record:") and RECORDS and t[7:] in RECORDS.lines:
+            print(f"  {t:<{w}}  {record_eta(t[7:], rate)}", flush=True)
+        else:
+            print(f"  {t:<{w}}  {pt.fmt_odds(p)}, {pt.fmt_eta(p, rate)}", flush=True)
+    any_line = any_record_eta(rate)
+    if any_line:
+        print(f"  {any_line}", flush=True)
+
+
+def any_record_eta(rate=None):
+    """'next record of any line: ~9.6 h' (the lines are nearly independent, so their chances add up)."""
+    rate = rate or RATE_NOW
+    if not (RECORDS and rate):
+        return ""
+    ps = [record_next(t)[1] for t in RECORDS.lines if RECORDS.best(t) is not None]
+    if len(ps) < 2 or len(ps) < len(RECORDS.lines):
+        return ""
+    return f"next record of any of the {len(ps)} lines: {pt.fmt_eta(sum(ps), rate)}"
+
+
 def report_odds(targets, width, rate, label):
-    """Odds and expected time per target, warnings for targets the host re-check could not keep up with."""
-    global ODDS
-    ODDS = None
+    """Odds per target (times follow once the rate is measured), warnings for targets the host re-check could not
+    keep up with. rate/label: the typical rate of the engine without pattern lines, only for those warnings."""
+    global ODDS, RATE_NOW
+    ODDS, RATE_NOW = None, None
     if not targets:
         return
     rows = []
@@ -676,8 +734,7 @@ def report_odds(targets, width, rate, label):
         rows.append((t, p))
         warn = ""
         if t.startswith("record:"):
-            print(f"target {t}: record line, {'no best yet (the first id is a record)' if best is None else f'best so far {best}, a new record'}"
-                  f"{'' if best is None else f': {pt.fmt_odds(p)}, {pt.fmt_eta(p, rate)} at {label}'}", flush=True)
+            print(f"target {t}: record line, {'no best yet (the first id is a record)' if best is None else f'best so far {best}, {record_eta(t[7:])}'}", flush=True)
             continue
         if t.startswith("match:") and pt.is_stat(t[6:]):
             if p > pt.WARN_ODDS:
@@ -689,8 +746,9 @@ def report_odds(targets, width, rate, label):
             elif f["pass"] > pt.WARN_ODDS:
                 warn = (f"  warning: the GPU prefilter passes ~1 in {1 / f['pass']:.1e}; the host re-check of those "
                         f"candidates will slow the search (add literal digits)")
-        print(f"target {t}: {pt.fmt_odds(p)}, {pt.fmt_eta(p, rate)} at {label}{warn}", flush=True)
+        print(f"target {t}: {pt.fmt_odds(p)}{warn}", flush=True)
     ODDS = {"targets": rows, "shown": False}
+    print("expected times follow after ~10 s, at the speed measured with these targets", flush=True)
 
 
 def first_match(targets, shown, full):
@@ -830,7 +888,11 @@ class RecordStore:
             self.mine[text]["note"] = note
         self.save()
         log_hit(self.dir, self.width, f"record:{text}", dest, kv.get("sha", ""), idd, value, "yes")
-        print(f"RECORD {text}{f' ({note})' if note else ''}: {value} (was {'none' if old is None else old}) {idd} file={dest}", flush=True)
+        shown = strip_estimate(note)
+        print(f"RECORD {text}{f' ({shown})' if shown else ''}: {value} (was {'none' if old is None else old}) {idd} file={dest}", flush=True)
+        if RATE_NOW:
+            any_line = any_record_eta()
+            print(f"  {record_eta(text)}" + (f"; {any_line}" if any_line else ""), flush=True)
         return True
 
     def drop(self, path):
@@ -851,10 +913,14 @@ class RecordStore:
     def summary(self):
         rows = [(t, self.mine[t]) for t in self.lines if t in self.mine]
         if rows:
-            print("records:", flush=True)
+            print("records" + (f" (times at the measured {pt.fmt_rate(RATE_NOW)}):" if RATE_NOW else ":"), flush=True)
             for t, e in rows:
-                note = NOTES.get((self.width, t), e.get("note", ""))
+                note = strip_estimate(NOTES.get((self.width, t), e.get("note", "")))
                 print(f"  {t:<24} {e['value']:>4}  {e['id']}  {e['file']}" + (f"  # {note}" if note else ""), flush=True)
+                if RATE_NOW:
+                    print(f"  {'':<24}       {record_eta(t)}", flush=True)
+            if any_record_eta():
+                print(f"  {any_record_eta()}", flush=True)
 
 
 RECORDS = None     # the RecordStore of the running search
@@ -1437,6 +1503,49 @@ def cmd_ids(args):
     return bad
 
 
+def cmd_records(args):
+    """Table of the record bests in DIR/records.json (default: every search folder under found/)."""
+    import glob
+    if args.dirs:
+        paths = [d if d.endswith(".json") else os.path.join(d, "records.json") for d in args.dirs]
+    else:
+        paths = sorted(glob.glob(os.path.join(FOUND, "*", "records.json")))
+        if not paths:
+            print(f"no records.json under {FOUND}")
+            return 1
+    bad = 0
+    for path in paths:
+        try:
+            with open(path, encoding="utf-8") as f:
+                data = json.load(f)
+        except (OSError, ValueError) as e:
+            print(f"error: {path}: {e}", file=sys.stderr)
+            bad = 1
+            continue
+        for group, lines in data.items():
+            rows = []
+            for line, e in lines.items():
+                note = re.sub(r"\s*\[[^\]]*\]$", "", e.get("note") or "")   # drop the [next N: ~T] estimate
+                note = re.sub(r"\s*\((?!max|min|0:).*\)$", "", note)         # and long asides like "(the Java ...)"
+                rows.append((note or line, str(e["value"]), e["id"], line))
+            if not rows:
+                continue
+            folder = os.path.dirname(os.path.abspath(path))
+            try:
+                folder = os.path.relpath(folder)
+            except ValueError:   # another drive on Windows
+                pass
+            print(f"{folder}  ({group}, {len(rows)} records)")
+            w0 = max(len(r[0]) for r in rows)
+            w1 = max(len(r[1]) for r in rows)
+            for label, value, rid, line in rows:
+                shown = line if len(line) <= 40 else line[:37] + "..."
+                link = (f"  {NM_URL}{rid}" if group == "namemc" else f"  {SKIN_URL}{rid}") if args.links else ""
+                print(f"  {label:<{w0}}  {value:>{w1}}  {rid}  {shown}{link}")
+            print()
+    return bad
+
+
 def cmd_verify(args):
     ok, msg = verify(load_rgba(skin_path(args.original)), args.result)
     print("OK" if ok else "FAIL", msg)
@@ -1908,6 +2017,13 @@ def build_parser():
                 "  py skinhash.py ids jeb_ 853c80ef-3c37-49fd-aa49-938b674adae6")
     p.add_argument("inputs", metavar="SKIN", nargs="+", help=SKIN_HELP)
     p.set_defaults(func=cmd_ids)
+
+    p = command("records", "Show the best value of every record line ({max}/{min}) saved in records.json.",
+                "  py skinhash.py records                         (every search folder under found/)\n"
+                "  py skinhash.py records found/nm_records_scorpion --links")
+    p.add_argument("dirs", metavar="DIR", nargs="*", help="search output folder (or its records.json); default: all under found/")
+    p.add_argument("--links", action="store_true", help="also print the NameMC / Mojang link of each record id")
+    p.set_defaults(func=cmd_records)
 
     p = command("verify", "Check that RESULT looks identical to ORIGINAL in game and hashes to its file name.",
                 "  py skinhash.py verify skins/steve.png found/steve/<id>.png\n"

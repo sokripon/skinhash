@@ -141,9 +141,10 @@ new_record, id, sha256, url, file), so a long run leaves a list you can open in 
 Quoting: in PowerShell and bash use single quotes, because `$` starts a variable inside double quotes
 (`-m 'dead$'`). In cmd.exe `^` is the escape character: use double quotes (`-m "^0{12}"`).
 
-At the start each target is printed with its odds and expected time at the engine's usual rate, e.g.
-`target match:^0{12}: ~1 in 2.8e14, ~16.3 h at ~4.80 G/s (typical gpu rate)`, and once the finder reports its rate, the expected times at
-the measured rate. A warning is printed when a pattern is very common (better than ~1 in 1e7) or when the part the
+At the start each target is printed with its odds, e.g. `target match:^0{12}: ~1 in 2.8e14`. After ~10 s (the
+first 5 s interval is warm-up and not used) the expected times follow at the rate measured with these targets on
+this machine, since every pattern line costs speed and the GPU skips record lines faster once their bests are high.
+A warning is printed when a pattern is very common (better than ~1 in 1e7) or when the part the
 GPU can test is (classes like `?d` or `[05af]` give the GPU no bits to compare; see below): the host re-check of
 every candidate would then be the bottleneck. `--every-target` runs until every pattern has a hit; `-n` counts hits
 over all targets.
@@ -204,7 +205,11 @@ py skinhash.py mojang skins/me.png -m '^dead & #0{10,}' -m '+{9}' -m '(??)\1{6}'
   `OUT/records.json`, so a rerun continues where it stopped (`--reset-records` starts over). Record lines do not
   count for `-n`; with only record lines the search runs until Ctrl+C, which prints the records. With `both`, a group
   needs a normal target (its first hit ends the phase).
-- Odds and expected time are printed per line. For a record line they are the odds of beating the current best.
+- `py skinhash.py records [DIR ...]` prints the saved bests as a table (default: every folder under `found/`;
+  `--links` adds the NameMC / Mojang link of each id).
+- Odds and expected time are printed per line. For a record line they are the odds of beating the current best
+  (`next 13: ~1 in 1.1e15, ~7.3 days at 1.79 G/s`), plus the time until any record line improves. Every new record
+  and the summary at exit print the same for the new best, at the measured (smoothed) rate.
   Counts, runs and staircases are exact; palindromes and word counts use an approximation (palindromes: a Poisson
   estimate over all centres, good to a factor of ~1.3 for long ones).
 - The GPU computes the same values as the reference (SWAR code over the digest words) and the host re-checks every

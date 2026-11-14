@@ -1230,9 +1230,10 @@ def fmt_secs(s):
         return f"{s / 60:.1f} min"
     if s < 172800:
         return f"{s / 3600:.1f} h"
-    if s < 3.2e7 * 3:
-        return f"{s / 86400:.1f} days"
-    return f"{_exp(s / 3.15e7)} years"
+    if s < 3.15e7:
+        return f"{s / 86400:.1f} days" if s < 864000 else f"{s / 86400:.0f} days"
+    y = s / 3.15e7
+    return f"{y:.1f} years" if y < 10 else f"{y:.0f} years" if y < 1e4 else f"{_exp(y)} years"
 
 
 def fmt_eta(p, rate):

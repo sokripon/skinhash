@@ -819,12 +819,20 @@ def start_keys():
     if not enable_vt():
         return
     if os.name == "nt":
+        import ctypes
         import msvcrt
 
         def getkey():
+            # getwch puts the console in raw mode while it waits, which turns Ctrl+C into a plain '\x03' and no
+            # signal. So it is only called once a key is waiting; the rest of the time Ctrl+C works as usual.
+            while not msvcrt.kbhit():
+                time.sleep(0.05)
             ch = msvcrt.getwch()
             if ch in ("\x00", "\xe0"):   # arrow and function keys come as two characters
                 msvcrt.getwch()
+                return ""
+            if ch == "\x03":   # Ctrl+C read as a key after all: send the real one to this console's processes
+                ctypes.windll.kernel32.GenerateConsoleCtrlEvent(0, 0)
                 return ""
             return ch
     else:

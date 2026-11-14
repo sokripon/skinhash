@@ -144,6 +144,9 @@ Quoting: in PowerShell and bash use single quotes, because `$` starts a variable
 At the start each target is printed with its odds, e.g. `target match:^0{12}: ~1 in 2.8e14`. After ~10 s (the
 first 5 s interval is warm-up and not used) the expected times follow at the rate measured with these targets on
 this machine, since every pattern line costs speed and the GPU skips record lines faster once their bests are high.
+In a terminal a hint line stays at the bottom: press `s` for the status (time running, ids tried, speed, every
+target's odds and expected time, each record line's best and next value, the time until any record line improves
+and the chance of a new record within the next hour). Set `SKINHASH_NO_KEYS=1` to turn this off.
 A warning is printed when a pattern is very common (better than ~1 in 1e7) or when the part the
 GPU can test is (classes like `?d` or `[05af]` give the GPU no bits to compare; see below): the host re-check of
 every candidate would then be the bottleneck. `--every-target` runs until every pattern has a hit; `-n` counts hits

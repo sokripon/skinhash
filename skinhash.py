@@ -26,6 +26,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import zlib
 
@@ -252,7 +253,10 @@ def run_finder(cmd, rgba, on_hit=None, verifier=None):
     global LAST_ROLLOVER, LAST_RATE, RATE_NOW
     if RECORDS:   # start values of the record lines: the best so far (also after a rollover or a CPU fallback)
         cmd = strip_best(cmd) + RECORDS.best_args()
+    global LAST_PROGRESS
     intervals = 0   # progress lines of this finder; the first interval includes start-up and is not used
+    if ODDS is not None:   # a search (not a benchmark): the hint line and 's' for the status
+        start_keys()
     # stderr (progress lines) is merged in so it can be reformatted
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     asked_stop = False
@@ -266,6 +270,8 @@ def run_finder(cmd, rgba, on_hit=None, verifier=None):
                     line = raw.replace(src, moved.get(src, final_path(src)))   # where the hit will be kept
             print(pretty_progress(line), end="", flush=True)
             m = PROGRESS_RE.match(line)
+            if m:
+                LAST_PROGRESS = (int(m.group(1)), int(m.group(2)), int(m.group(5)))
             if m and int(m.group(3)) > 0:
                 intervals += 1
                 r = int(m.group(3))   # rate of the last interval
@@ -718,6 +724,141 @@ def any_record_eta(rate=None):
     if len(ps) < 2 or max(ps) > 1e-3:   # a line still taking (nearly) every id would make the sum meaningless
         return ""
     return f"next record of any of the {len(ps)} lines: {pt.fmt_eta(sum(ps), rate)}"
+
+
+# ---- keys: a hint line pinned under the output, 's' prints the status ------------------------------------------
+LAST_PROGRESS = None   # (elapsed s, tried, hits) of the last progress line of the running finder
+KEYS_ON = False
+FOOTER_TEXT = "press s for status, Ctrl+C to stop"
+
+
+class Footer:
+    """Stands in for sys.stdout/sys.stderr in a terminal: before any output the hint line is erased, after a complete
+    line it is drawn again, so it always stays at the bottom. One lock for both streams and the key thread."""
+    lock = threading.RLock()
+    shown = False
+    at_bol = True
+
+    def __init__(self, stream):
+        self.stream = stream
+
+    def write(self, data):
+        with Footer.lock:
+            if Footer.shown:
+                self.stream.write("\r\x1b[K")
+                Footer.shown = False
+            n = self.stream.write(data)
+            if data:
+                Footer.at_bol = data.endswith("\n")
+            if Footer.at_bol and KEYS_ON:
+                self.stream.write(f"\x1b[2m{FOOTER_TEXT}\x1b[0m")
+                Footer.shown = True
+            self.stream.flush()
+            return n
+
+    def flush(self):
+        self.stream.flush()
+
+    def __getattr__(self, name):
+        return getattr(self.stream, name)
+
+
+def enable_vt():
+    """ANSI escape codes on a Windows console (Windows Terminal has them on, the old console needs this)."""
+    if os.name != "nt":
+        return True
+    try:
+        import ctypes
+        k = ctypes.windll.kernel32
+        h = k.GetStdHandle(-11)
+        mode = ctypes.c_uint32()
+        return bool(k.GetConsoleMode(h, ctypes.byref(mode)) and k.SetConsoleMode(h, mode.value | 0x0004))
+    except Exception:
+        return False
+
+
+def status_text():
+    """What 's' prints: progress, speed, every target's odds and expected time, the record lines' next values."""
+    out = ["", "---- status " + "-" * 60]
+    if LAST_PROGRESS:
+        secs, tried, hits = LAST_PROGRESS
+        h, rest = divmod(secs, 3600)
+        out.append(f"running {h}:{rest // 60:02d}:{rest % 60:02d}, {tried:_} ids tried, {hits} hits"
+                   + (f", {pt.fmt_rate(RATE_NOW)} now" if RATE_NOW else ""))
+    if not RATE_NOW:
+        out.append("speed not measured yet (after ~10 s), so no times yet")
+    if ODDS:
+        normal = [(t, p) for t, p in ODDS["targets"] if not t.startswith("record:")]
+        for t, p in normal:
+            out.append(f"  {t}: {pt.fmt_odds(p)}" + (f", {pt.fmt_eta(p, RATE_NOW)}" if RATE_NOW else ""))
+    if RECORDS and RECORDS.lines:
+        w = max(len(t) for t in RECORDS.lines)
+        for t in RECORDS.lines:
+            e = RECORDS.mine.get(t)
+            best = f"{e['value']:>4}  {e['id']}" if e else f"{'-':>4}  {'':<{16 if RECORDS.width == 16 else 64}}"
+            out.append(f"  {t:<{w}}  {best}  {record_eta(t)}")
+        if RATE_NOW:
+            ps = sum(record_next(t)[1] for t in RECORDS.lines)
+            a = any_record_eta()
+            if a:
+                import math
+                hour = 1 - math.exp(-ps * RATE_NOW * 3600)
+                out.append(f"  {a}; chance of a new record within the next hour: {hour:.0%}")
+    out.append("-" * 72)
+    return "\n".join(out) + "\n"
+
+
+def start_keys():
+    """Pin the hint line and listen for keys, only when both stdin and stdout are a terminal (not in pipes, tests
+    or the cloud)."""
+    global KEYS_ON
+    if KEYS_ON or not (sys.stdin.isatty() and sys.stdout.isatty()) or os.environ.get("SKINHASH_NO_KEYS"):
+        return
+    if not enable_vt():
+        return
+    if os.name == "nt":
+        import msvcrt
+
+        def getkey():
+            ch = msvcrt.getwch()
+            if ch in ("\x00", "\xe0"):   # arrow and function keys come as two characters
+                msvcrt.getwch()
+                return ""
+            return ch
+    else:
+        import termios
+        import tty
+        fd = sys.stdin.fileno()
+        old = termios.tcgetattr(fd)
+        tty.setcbreak(fd)   # keys without Enter and without echo; Ctrl+C still interrupts
+        atexit.register(termios.tcsetattr, fd, termios.TCSADRAIN, old)
+
+        def getkey():
+            return sys.stdin.read(1)
+
+    def loop():
+        while True:
+            try:
+                ch = getkey()
+            except Exception:
+                return
+            if ch in ("s", "S"):
+                sys.stdout.write(status_text())
+
+    sys.stdout, sys.stderr = Footer(sys.stdout), Footer(sys.stderr)
+    KEYS_ON = True
+
+    def stop():
+        global KEYS_ON
+        with Footer.lock:
+            KEYS_ON = False
+            if Footer.shown:
+                sys.stdout.stream.write("\r\x1b[K")
+                Footer.shown = False
+            sys.stdout.stream.flush()
+    atexit.register(stop)
+    threading.Thread(target=loop, daemon=True).start()
+    sys.stdout.write("")   # draw the hint line
 
 
 def report_odds(targets, width, rate, label):

@@ -145,7 +145,7 @@ At the start each target is printed with its odds, e.g. `target match:^0{12}: ~1
 first 5 s interval is warm-up and not used) the expected times follow at the rate measured with these targets on
 this machine, since every pattern line costs speed and the GPU skips record lines faster once their bests are high.
 In a terminal a hint line stays at the bottom: press `s` for the status (time running, ids tried, speed, every
-target's odds and expected time, each record line's best and next value, the time until any record line improves
+target's odds and expected time, each record line's best, when it was set and its next value, the time until any record line improves
 and the chance of a new record within the next hour). Set `SKINHASH_NO_KEYS=1` to turn this off.
 A warning is printed when a pattern is very common (better than ~1 in 1e7) or when the part the
 GPU can test is (classes like `?d` or `[05af]` give the GPU no bits to compare; see below): the host re-check of
@@ -208,7 +208,7 @@ py skinhash.py mojang skins/me.png -m '^dead & #0{10,}' -m '+{9}' -m '(??)\1{6}'
   `OUT/records.json`, so a rerun continues where it stopped (`--reset-records` starts over). Record lines do not
   count for `-n`; with only record lines the search runs until Ctrl+C, which prints the records. With `both`, a group
   needs a normal target (its first hit ends the phase).
-- `py skinhash.py records [DIR ...]` prints the saved bests as a table (default: every folder under `found/`;
+- `py skinhash.py records [DIR ...]` prints the saved bests and when they were set as a table (default: every folder under `found/`;
   `--links` adds the NameMC / Mojang link of each id).
 - Odds and expected time are printed per line. For a record line they are the odds of beating the current best
   (`next 13: ~1 in 1.1e15, ~7.3 days at 1.79 G/s`), plus the time until any record line improves. Every new record

@@ -793,10 +793,12 @@ def status_text():
             out.append(f"  {t}: {pt.fmt_odds(p)}" + (f", {pt.fmt_eta(p, RATE_NOW)}" if RATE_NOW else ""))
     if RECORDS and RECORDS.lines:
         w = max(len(t) for t in RECORDS.lines)
+        times = record_times(RECORDS.dir, {t: RECORDS.mine[t] for t in RECORDS.lines if t in RECORDS.mine})
         for t in RECORDS.lines:
             e = RECORDS.mine.get(t)
             best = f"{e['value']:>4}  {e['id']}" if e else f"{'-':>4}  {'':<{16 if RECORDS.width == 16 else 64}}"
-            out.append(f"  {t:<{w}}  {best}  {record_eta(t)}")
+            ago = f"set {fmt_ago(times[t])}" if t in times else ""
+            out.append(f"  {t:<{w}}  {best}  {ago:<17}  {record_eta(t)}")
         if RATE_NOW:
             ps = sum(record_next(t)[1] for t in RECORDS.lines)
             a = any_record_eta()
@@ -1024,7 +1026,7 @@ class RecordStore:
         shutil.copyfile(path, dest)
         self.drop(path)
         note = NOTES.get((self.width, text), "")
-        self.mine[text] = {"value": value, "id": idd, "file": os.path.relpath(dest, self.dir)}
+        self.mine[text] = {"value": value, "id": idd, "file": os.path.relpath(dest, self.dir), "time": int(time.time())}
         if note:
             self.mine[text]["note"] = note
         self.save()
@@ -1062,6 +1064,33 @@ class RecordStore:
                     print(f"  {'':<24}       {record_eta(t)}", flush=True)
             if any_record_eta():
                 print(f"  {any_record_eta()}", flush=True)
+
+
+def record_times(outdir, entries):
+    """{line: unix time the best was set} from the entries' "time" (saved since 2026-11-14), else from the newest
+    hits.csv row of that line with the same value and id (local time; older cloud rows are UTC)."""
+    out = {t: e["time"] for t, e in entries.items() if "time" in e}
+    missing = {t: e for t, e in entries.items() if t not in out}
+    if missing:
+        try:
+            with open(os.path.join(outdir, "hits.csv"), newline="", encoding="utf-8") as f:
+                for row in csv.DictReader(f):
+                    text = re.sub(r"^record:", "", row.get("target", ""))
+                    e = missing.get(text)
+                    if e and row.get("id") == e["id"] and str(e["value"]) == row.get("value"):
+                        try:
+                            out[text] = time.mktime(time.strptime(row["time"], "%Y-%m-%d %H:%M:%S"))
+                        except (KeyError, ValueError):
+                            pass
+        except OSError:
+            pass
+    return out
+
+
+def fmt_ago(t):
+    s = max(0, time.time() - t)
+    return ("just now" if s < 60 else f"{s / 60:.0f} min ago" if s < 5400 else f"{s / 3600:.1f} h ago" if s < 172800
+            else f"{s / 86400:.0f} days ago")
 
 
 RECORDS = None     # the RecordStore of the running search
@@ -1665,10 +1694,12 @@ def cmd_records(args):
             continue
         for group, lines in data.items():
             rows = []
+            times = record_times(os.path.dirname(path), lines)
             for line, e in lines.items():
                 note = re.sub(r"\s*\[[^\]]*\]$", "", e.get("note") or "")   # drop the [next N: ~T] estimate
                 note = re.sub(r"\s*\((?!max|min|0:).*\)$", "", note)         # and long asides like "(the Java ...)"
-                rows.append((note or line, str(e["value"]), e["id"], line))
+                when = time.strftime("%Y-%m-%d %H:%M", time.localtime(times[line])) if line in times else "?"
+                rows.append((note or line, str(e["value"]), e["id"], line, when))
             if not rows:
                 continue
             folder = os.path.dirname(os.path.abspath(path))
@@ -1679,10 +1710,10 @@ def cmd_records(args):
             print(f"{folder}  ({group}, {len(rows)} records)")
             w0 = max(len(r[0]) for r in rows)
             w1 = max(len(r[1]) for r in rows)
-            for label, value, rid, line in rows:
+            for label, value, rid, line, when in rows:
                 shown = line if len(line) <= 40 else line[:37] + "..."
                 link = (f"  {NM_URL}{rid}" if group == "namemc" else f"  {SKIN_URL}{rid}") if args.links else ""
-                print(f"  {label:<{w0}}  {value:>{w1}}  {rid}  {shown}{link}")
+                print(f"  {label:<{w0}}  {value:>{w1}}  {rid}  {when:<16}  {shown}{link}")
             print()
     return bad
 

@@ -689,9 +689,9 @@ def record_eta(text, rate=None):
     """'next 13: ~1 in 4.5e15, ~46 days at 1.12 G/s' for a record line (no time before the rate is measured)."""
     rate = rate or RATE_NOW
     nxt, p = record_next(text)
-    if nxt is None:
+    if nxt is None and p > 1e-3:
         return "no best yet (the first id is a record)"
-    s = f"next {nxt}: {pt.fmt_odds(p)}"
+    s = f"{'first one' if nxt is None else f'next {nxt}'}: {pt.fmt_odds(p)}"   # first one: a line with a fixed part
     return s + (f", {pt.fmt_eta(p, rate)} at {pt.fmt_rate(rate)}" if rate else "")
 
 
@@ -714,8 +714,8 @@ def any_record_eta(rate=None):
     rate = rate or RATE_NOW
     if not (RECORDS and rate):
         return ""
-    ps = [record_next(t)[1] for t in RECORDS.lines if RECORDS.best(t) is not None]
-    if len(ps) < 2 or len(ps) < len(RECORDS.lines):
+    ps = [record_next(t)[1] for t in RECORDS.lines]
+    if len(ps) < 2 or max(ps) > 1e-3:   # a line still taking (nearly) every id would make the sum meaningless
         return ""
     return f"next record of any of the {len(ps)} lines: {pt.fmt_eta(sum(ps), rate)}"
 
@@ -734,7 +734,7 @@ def report_odds(targets, width, rate, label):
         rows.append((t, p))
         warn = ""
         if t.startswith("record:"):
-            print(f"target {t}: record line, {'no best yet (the first id is a record)' if best is None else f'best so far {best}, {record_eta(t[7:])}'}", flush=True)
+            print(f"target {t}: record line, {'' if best is None else f'best so far {best}, '}{record_eta(t[7:])}", flush=True)
             continue
         if t.startswith("match:") and pt.is_stat(t[6:]):
             if p > pt.WARN_ODDS:

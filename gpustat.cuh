@@ -271,6 +271,45 @@ template <int NW> __device__ __forceinline__ int eval_op(const StatOp &op, const
     }
 }
 
+/* digit p of the digest (p is not a compile-time constant: select the word instead of indexing, which would put
+ * the digest in local memory) */
+template <int NW> __device__ __forceinline__ u32 nib_at(const u32 (&w)[NW], int p) {
+    u32 x = w[0];
+#pragma unroll
+    for (int k = 1; k < NW; k++) x = (p >> 3) == k ? w[k] : x;
+    return (x >> (28 - 4 * (p & 7))) & 15u;
+}
+
+/* Early exit: false only if the op certainly cannot reach `need` digits, decided from one or two digits.
+ *   run of r > W/2 anywhere: the run covers digits W/2-1 and W/2 (it starts at <= W-r < W/2 and ends at >= r-1 >= W/2)
+ *   ^X{max} after npre digits: digits npre and npre+need-1;  X{max}$: digits W-1 and W-need
+ *   staircase of r > W/2: the step from digit W/2-1 to W/2
+ * Rejects ~15/16 (runs, staircases) to ~255/256 of the ids before the full evaluation; a necessary condition only,
+ * so the values are unchanged (the self-test checks that). */
+template <int NW> __device__ __forceinline__ bool probe_ok(const StatOp &op, const u32 (&w)[NW], int need) {
+    constexpr int W = 8 * NW, C = W / 2;
+    switch (op.kind) {
+    case SK_HEXRUN:
+        if (need <= C || need > W) return true;
+        return (op.d >> nib_at<NW>(w, C - 1) & 1u) && (op.d >> nib_at<NW>(w, C) & 1u);
+    case SK_HEXREC: {
+        const int a = (int)op.a;
+        if (need < 1 || a + need > W) return true;
+        return (op.d >> nib_at<NW>(w, a) & 1u) && (op.d >> nib_at<NW>(w, a + need - 1) & 1u);
+    }
+    case SK_HEXEND:
+        if (need < 1 || need > W) return true;
+        return (op.d >> nib_at<NW>(w, W - 1) & 1u) && (op.d >> nib_at<NW>(w, W - need) & 1u);
+    case SK_UP: case SK_DOWN: {
+        if (need <= C || need > W) return true;
+        const u32 x = nib_at<NW>(w, C - 1), y = nib_at<NW>(w, C);
+        return op.kind == SK_UP ? (x != 15u && y == x + 1u) : (x != 0u && y + 1u == x);
+    }
+    default:
+        return true;
+    }
+}
+
 /* One line: every term holds; for a record line the record term must beat `best`. val: its value. */
 template <int NW> __device__ __forceinline__ bool stat_line(u32 li, const Dg<NW> &dg, int zl, int best, int *val) {
     const StatLineC L = c_sl[li];
@@ -278,11 +317,13 @@ template <int NW> __device__ __forceinline__ bool stat_line(u32 li, const Dg<NW>
         const StatOp op = c_sop[L.first + j];
         const bool scalar = op.kind == SK_COUNT || op.kind == SK_DIST || op.kind == SK_WORDS;
         if (!op.rec) {
+            if (!scalar && !probe_ok<NW>(op, dg.w, (int)op.b)) return false;
             const int v = eval_op<NW>(op, dg, zl, (int)op.b);
             if (v == FAILV) return false;
             if (scalar && (v < (int)op.b || v > (int)op.c)) return false;
         } else {
             const int step = op.kind == SK_PER ? (int)op.a : 1;
+            if (op.rec == 1 && !probe_ok<NW>(op, dg.w, best + step)) return false;
             const int v = eval_op<NW>(op, dg, zl, best + step);
             if (v == FAILV) return false;
             if (op.rec == 1 ? v <= best : v >= best) return false;
@@ -319,7 +360,9 @@ template <int NW> __device__ STAT_CALL bool stat_check(Dg<NW> dg) {
         if (!L.rec) {
             if (!report && stat_line<NW>(li, dg, zl, 0, &v)) report = true;
         } else {
-            const int best = *(volatile int *)&d_rbest[li];
+            /* cached read (L1): a stale, lower best only lets a few more candidates reach the atomic below, which
+             * compares with the current value, so only real improvements are reported. volatile cost ~4% per line. */
+            const int best = __ldca(&d_rbest[li]);
             if (stat_line<NW>(li, dg, zl, best, &v)) {
                 if (L.exact) {
                     const int old = L.rec == 1 ? atomicMax(&d_rbest[li], v) : atomicMin(&d_rbest[li], v);
@@ -490,7 +533,7 @@ template <int NW> static inline int stat_selftest_main(const std::vector<sline_t
     cudaMalloc(&d_dg, dg.size() * 4); cudaMalloc(&d_best, MAXSL * 4); cudaMalloc(&d_out, (size_t)N * MAXSL * 2 * 4);
     cudaMemcpy(d_dg, dg.data(), dg.size() * 4, cudaMemcpyHostToDevice);
     long long bad = 0, passes = 0;
-    for (int round = 0; round < 2; round++) {
+    for (int round = 0; round < 3; round++) {
         int best[MAXSL] = {0};
         for (int li = 0; li < nl; li++) {
             const int r = ls[li].rec_term >= 0 ? ls[li].t[ls[li].rec_term].rec : 0;
@@ -498,6 +541,17 @@ template <int NW> static inline int stat_selftest_main(const std::vector<sline_t
             if (r && round == 1) {   /* a best that about half of the ids beat: the value of a sample id */
                 int v;
                 for (int g = 0; g < 400; g++) if (st_eval(&ls[li], &nib[(size_t)g * 64], &v)) { best[li] = v; if (g > 20 + li) break; }
+            }
+            if (r && round == 2) {   /* a best near the top that few ids beat (long runs: the early exits of probe_ok):
+                                      * the second best value that occurs, so it is a value a real record can have */
+                const int none = r == 2 ? ST_NONE_MIN : ST_NONE_MAX;
+                int v, ext = none, second = none;
+                for (int g = 0; g < N; g++) {
+                    if (!st_eval(&ls[li], &nib[(size_t)g * 64], &v)) continue;
+                    if (st_beats(r, v, ext)) { second = ext; ext = v; }
+                    else if (v != ext && st_beats(r, v, second)) second = v;
+                }
+                if (second != none) best[li] = second;
             }
         }
         cudaMemcpy(d_best, best, sizeof best, cudaMemcpyHostToDevice);
@@ -524,7 +578,7 @@ template <int NW> static inline int stat_selftest_main(const std::vector<sline_t
             }
     }
     cudaFree(d_dg); cudaFree(d_best); cudaFree(d_out);
-    printf("stat selftest: %s (%d digests x %d lines x 2 rounds, %lld passing)\n", bad ? "FAILED" : "OK", N, nl, passes);
+    printf("stat selftest: %s (%d digests x %d lines x 3 rounds, %lld passing)\n", bad ? "FAILED" : "OK", N, nl, passes);
     return bad ? 5 : 0;
 }
 

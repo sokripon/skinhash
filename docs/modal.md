@@ -79,7 +79,7 @@ $0.19/h. Speed per dollar is in trillions of candidates per dollar.
 - The image is `nvidia/cuda:13.0.0-devel` with Python, gcc and zlib. It holds only the sources and
   `skins/steve.png`, never your skins, `keep/` or `found/`.
 - `build.sh` compiles the GPU finders for every supported architecture. The first run builds the image,
-  which takes about 10 minutes; later runs reuse it until a source file changes.
+  which takes about 15 minutes; later runs reuse it until a source file changes.
 - The container commits the volume every minute and when the search ends, so results survive even if
   Modal stops the container abruptly.
 - The image only exists in your Modal account. Anyone else who runs `modal_app.py` builds their own.

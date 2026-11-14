@@ -20,7 +20,10 @@ ARCHS="${CUDA_ARCHS:-75 80 86 89 90 100 120}"
 GENCODE=""
 for a in $ARCHS; do GENCODE="$GENCODE -gencode arch=compute_$a,code=sm_$a"; done
 echo "== gpufinder / namemcgpu ($NVCC, sm: $ARCHS)"
-# -t 0: the architectures compile in parallel (gpufinder takes ~10 min per architecture)
-"$NVCC" -O3 -t 0 $GENCODE -o namemcgpu namemcgpu.cu
-"$NVCC" -O3 -t 0 $GENCODE -o gpufinder gpufinder.cu
+# The two finders compile at the same time as separate processes. Not nvcc -t 0 (parallel architectures inside
+# one nvcc): it sometimes fails with "nvlink fatal: Could not read file .../tmpxft_..._dlink.reg.c".
+"$NVCC" -O3 $GENCODE -o namemcgpu namemcgpu.cu & NM=$!
+"$NVCC" -O3 $GENCODE -o gpufinder gpufinder.cu & GF=$!
+wait $NM || { echo "namemcgpu build failed"; exit 1; }
+wait $GF || { echo "gpufinder build failed"; exit 1; }
 echo "built: fastfinder hashfinder namemcfinder gpufinder namemcgpu"

@@ -725,7 +725,7 @@ for exe_name, width in (("gpufinder", 64), ("namemcgpu", 16)):
             pass
     r = subprocess.run([exe, "--stat-selftest", *args], capture_output=True, text=True, timeout=300)
     check(r.returncode == 0 and "stat selftest: OK" in r.stdout,
-          f"{exe_name}: every stat kind equals the C reference on 120000 random and crafted ids x 2 record bests ({r.stdout.strip()[-80:]}{r.stderr.strip()[-200:]})")
+          f"{exe_name}: every stat kind equals the C reference on 120000 random and crafted ids x 3 record bests (none, a median, near the top) ({r.stdout.strip()[-80:]}{r.stderr.strip()[-200:]})")
 
 
 # ---- end to end on skins/steve.png ----------------------------------------------------------------------------

@@ -144,7 +144,8 @@ Quoting: in PowerShell and bash use single quotes, because `$` starts a variable
 At the start each target is printed with its odds, e.g. `target match:^0{12}: ~1 in 2.8e14`. After ~10 s (the
 first 5 s interval is warm-up and not used) the expected times follow at the rate measured with these targets on
 this machine, since every pattern line costs speed and the GPU skips record lines faster once their bests are high.
-In a terminal a hint line stays at the bottom: press `s` for the status (time running, ids tried, speed, every
+In a terminal the progress stays in one line at the bottom (only hits, records and messages scroll; `p` switches
+to keeping every progress line). Press `s` for the status (time running, ids tried, speed, every
 target's odds and expected time, each record line's best, when it was set and its next value, the time until any record line improves
 and the chance of a new record within the next hour). Set `SKINHASH_NO_KEYS=1` to turn this off.
 A warning is printed when a pattern is very common (better than ~1 in 1e7) or when the part the

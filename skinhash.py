@@ -253,7 +253,7 @@ def run_finder(cmd, rgba, on_hit=None, verifier=None):
     global LAST_ROLLOVER, LAST_RATE, RATE_NOW
     if RECORDS:   # start values of the record lines: the best so far (also after a rollover or a CPU fallback)
         cmd = strip_best(cmd) + RECORDS.best_args()
-    global LAST_PROGRESS
+    global LAST_PROGRESS, PROGRESS_FOOT
     intervals = 0   # progress lines of this finder; the first interval includes start-up and is not used
     if ODDS is not None:   # a search (not a benchmark): the hint line and 's' for the status
         start_keys()
@@ -268,8 +268,12 @@ def run_finder(cmd, rgba, on_hit=None, verifier=None):
                 src = raw.rsplit("file=", 1)[1].strip()
                 if not raw.split()[1].startswith("record:"):
                     line = raw.replace(src, moved.get(src, final_path(src)))   # where the hit will be kept
-            print(pretty_progress(line), end="", flush=True)
             m = PROGRESS_RE.match(line)
+            if m and KEYS_ON and COMPACT:
+                PROGRESS_FOOT = compact_progress(m)
+                sys.stdout.write("")   # redraws the bottom line
+            else:
+                print(pretty_progress(line), end="", flush=True)
             if m:
                 LAST_PROGRESS = (int(m.group(1)), int(m.group(2)), int(m.group(5)))
             if m and int(m.group(3)) > 0:
@@ -729,7 +733,23 @@ def any_record_eta(rate=None):
 # ---- keys: a hint line pinned under the output, 's' prints the status ------------------------------------------
 LAST_PROGRESS = None   # (elapsed s, tried, hits) of the last progress line of the running finder
 KEYS_ON = False
-FOOTER_TEXT = "press s for status, Ctrl+C to stop"
+COMPACT = True         # progress lines update the bottom line instead of scrolling ('p' switches)
+PROGRESS_FOOT = ""     # the latest progress, shown in the bottom line in compact mode
+
+
+def footer_text():
+    hint = f"s status, p {'keep progress lines' if COMPACT else 'progress in this line'}, Ctrl+C stop"
+    text = f"{PROGRESS_FOOT}  |  {hint}" if COMPACT and PROGRESS_FOOT else hint
+    width = shutil.get_terminal_size((120, 20)).columns - 1   # a wrapped line could not be erased with one \r
+    return text if len(text) <= width else text[:max(0, width - 3)] + "..."
+
+
+def compact_progress(m):
+    """'[0:12:05] 1.38 T tried, 1.79 G/s (avg 1.80 G/s), 2 hits' from a PROGRESS_RE match."""
+    secs, tried, rate, avg, hits = (int(m.group(i)) for i in (1, 2, 3, 4, 5))
+    h, rest = divmod(secs, 3600)
+    t = f"{tried / 1e12:.2f} T" if tried >= 1e12 else f"{tried / 1e9:.1f} G" if tried >= 1e9 else f"{tried:_}"
+    return f"[{h}:{rest // 60:02d}:{rest % 60:02d}] {t} tried, {pt.fmt_rate(rate)} (avg {pt.fmt_rate(avg)}), {hits} hits"
 
 
 class Footer:
@@ -751,7 +771,7 @@ class Footer:
             if data:
                 Footer.at_bol = data.endswith("\n")
             if Footer.at_bol and KEYS_ON:
-                self.stream.write(f"\x1b[2m{FOOTER_TEXT}\x1b[0m")
+                self.stream.write(f"\x1b[2m{footer_text()}\x1b[0m")
                 Footer.shown = True
             self.stream.flush()
             return n
@@ -847,6 +867,7 @@ def start_keys():
             return sys.stdin.read(1)
 
     def loop():
+        global COMPACT
         while True:
             try:
                 ch = getkey()
@@ -854,6 +875,9 @@ def start_keys():
                 return
             if ch in ("s", "S"):
                 sys.stdout.write(status_text())
+            elif ch in ("p", "P"):
+                COMPACT = not COMPACT
+                sys.stdout.write(f"(progress lines {'update the bottom line' if COMPACT else 'are kept'}; p switches)\n")
 
     sys.stdout, sys.stderr = Footer(sys.stdout), Footer(sys.stderr)
     KEYS_ON = True

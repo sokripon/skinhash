@@ -15,6 +15,7 @@
  *   palindrome  8-digit windows of the digest against the nibble-reversed digest at every centre; only centres that
  *             pass are expanded exactly (out of line)
  *   words     one 32-bit window compare per word and offset
+ *   #!(words) the same compares, in a right-to-left dp (the most words that share no digit) over a window of 8 values
  * Record lines keep their best in d_rbest[] (atomicMax / atomicMin on the exact value) when every term is exact.
  */
 #pragma once
@@ -29,7 +30,7 @@
 #define MAXSM 16
 #define FAILV (-2147483647 - 1)
 
-enum { SK_COUNT = 1, SK_DIST, SK_PER, SK_UP, SK_DOWN, SK_PAL, SK_WORDS, SK_HEXMASK, SK_HEXREC, SK_HEXRUN, SK_HEXEND };
+enum { SK_COUNT = 1, SK_DIST, SK_PER, SK_UP, SK_DOWN, SK_PAL, SK_WORDS, SK_HEXMASK, SK_HEXREC, SK_HEXRUN, SK_HEXEND, SK_WORDSEP };
 struct StatOp { u32 kind, rec, a, b, c, d, e; };         /* c = upper bound (INT_MAX = none) */
 struct StatLineC { u32 first, n, rec, exact; };
 
@@ -170,6 +171,30 @@ template <int NW> __device__ __noinline__ int count_words(Dg<NW> dg, int zl, u32
     return cnt;
 }
 
+/* #!(...): the most words that share no digit. dp[o] = max(dp[o+1], 1 + dp[o+len]) for each word at o, from the right;
+ * only dp[o+1..o+8] is needed (words have at most 8 digits), kept in d1..d8 so that every index is a constant. */
+template <int NW> __device__ __noinline__ int count_words_sep(Dg<NW> dg, int zl, u32 first, u32 nw) {
+    constexpr int W = 8 * NW;
+    int d1 = 0, d2 = 0, d3 = 0, d4 = 0, d5 = 0, d6 = 0, d7 = 0, d8 = 0;
+#pragma unroll
+    for (int o = W - 1; o >= 0; o--) {
+        int best = d1;
+        if (o >= zl) {
+            const u32 x = win(dg.w, o);
+            for (u32 j = 0; j < nw; j++) {
+                const u32 wi = first + j;
+                const int len = (int)c_sw[wi * 3 + 2];
+                if (((x ^ c_sw[wi * 3]) & c_sw[wi * 3 + 1]) == 0u && o + len <= W) {
+                    const int t = len == 1 ? d1 : len == 2 ? d2 : len == 3 ? d3 : len == 4 ? d4 : len == 5 ? d5 : len == 6 ? d6 : len == 7 ? d7 : d8;
+                    best = max(best, 1 + t);
+                }
+            }
+        }
+        d8 = d7; d7 = d6; d6 = d5; d5 = d4; d4 = d3; d3 = d2; d2 = d1; d1 = best;
+    }
+    return d1;
+}
+
 /* The value of one op, or FAILV when a run-type op cannot reach `need` (digits). Scalar ops (count, distinct,
  * words) always return their value; the caller applies the range. */
 template <int NW> __device__ __forceinline__ int eval_op(const StatOp &op, const Dg<NW> &dg, int zl, int need) {
@@ -243,6 +268,8 @@ template <int NW> __device__ __forceinline__ int eval_op(const StatOp &op, const
     }
     case SK_WORDS:
         return count_words<NW>(dg, zl, op.a, op.d);
+    case SK_WORDSEP:
+        return count_words_sep<NW>(dg, zl, op.a, op.d);
     case SK_HEXMASK:
         return hexmask_ok<NW>(w, op.a) ? 1 : FAILV;
     case SK_HEXREC: {
@@ -315,7 +342,7 @@ template <int NW> __device__ __forceinline__ bool stat_line(u32 li, const Dg<NW>
     const StatLineC L = c_sl[li];
     for (u32 j = 0; j < L.n; j++) {
         const StatOp op = c_sop[L.first + j];
-        const bool scalar = op.kind == SK_COUNT || op.kind == SK_DIST || op.kind == SK_WORDS;
+        const bool scalar = op.kind == SK_COUNT || op.kind == SK_DIST || op.kind == SK_WORDS || op.kind == SK_WORDSEP;
         if (!op.rec) {
             if (!scalar && !probe_ok<NW>(op, dg.w, (int)op.b)) return false;
             const int v = eval_op<NW>(op, dg, zl, (int)op.b);
@@ -419,7 +446,7 @@ static inline bool stat_build(const std::vector<sline_t> &ls, int NWd, StatTable
             case ST_DOWN: op.kind = SK_DOWN; break;
             case ST_PAL: op.kind = SK_PAL; break;
             case ST_WORDS:
-                op.kind = SK_WORDS; op.a = (u32)(T.words.size() / 3); op.d = (u32)t.nwords;
+                op.kind = t.sep ? SK_WORDSEP : SK_WORDS; op.a = (u32)(T.words.size() / 3); op.d = (u32)t.nwords;
                 for (int i = 0; i < t.nwords; i++) {
                     u32 v = 0, m = 0;
                     for (int j = 0; j < t.wlen[i]; j++) { v |= (u32)t.word[i][j] << (28 - 4 * j); m |= 0xFu << (28 - 4 * j); }
@@ -465,7 +492,7 @@ static inline bool stat_build(const std::vector<sline_t> &ls, int NWd, StatTable
         }
         if (lc.n == 0) { snprintf(err, (size_t)errlen, "stat line '%s' has nothing the GPU can test", L.text); return false; }
         /* sort this line's ops by cost (stable); the record op keeps working wherever it is */
-        auto cost = [](const StatOp &o) { return o.kind == SK_HEXMASK || o.kind == SK_HEXREC || o.kind == SK_HEXEND ? 0 : o.kind == SK_COUNT ? 1 : o.kind == SK_DIST ? 2 : o.kind == SK_WORDS ? 5 : o.kind == SK_PAL ? 6 : 3; };
+        auto cost = [](const StatOp &o) { return o.kind == SK_HEXMASK || o.kind == SK_HEXREC || o.kind == SK_HEXEND ? 0 : o.kind == SK_COUNT ? 1 : o.kind == SK_DIST ? 2 : o.kind == SK_WORDS || o.kind == SK_WORDSEP ? 5 : o.kind == SK_PAL ? 6 : 3; };
         std::stable_sort(T.ops.begin() + lc.first, T.ops.end(), [&](const StatOp &a, const StatOp &b) { return cost(a) < cost(b); });
         T.lines.push_back(lc);
     }
@@ -588,7 +615,8 @@ template <int NW> static inline int stat_selftest_cli(int argc, char **argv) {
     for (int i = 2; i < argc; i++) {
         if (strcmp(argv[i], "-m") || i + 1 >= argc) { fprintf(stderr, "usage: %s --stat-selftest -m STATLINE...\n", argv[0]); return 1; }
         sline_t sl; char err[256];
-        if (sline_parse(argv[++i], 8 * NW, &sl, err, sizeof err) || ls.size() >= ST_MAXLINES) { fprintf(stderr, "%s\n", err); return 1; }
+        if (ls.size() >= ST_MAXLINES) { fprintf(stderr, "stat selftest: at most %d lines\n", ST_MAXLINES); return 1; }
+        if (sline_parse(argv[++i], 8 * NW, &sl, err, sizeof err)) { fprintf(stderr, "%s\n", err); return 1; }
         ls.push_back(sl);
     }
     StatTables T; char err[256];

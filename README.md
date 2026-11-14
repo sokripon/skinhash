@@ -170,6 +170,7 @@ spacing and any case.
 | `#?l{,0}` / `#?l{50,}` | letters a-f: at most 0 (no letters at all) / at least 50 |
 | `#[0-3]{20,}` | the count works for any digit, `?d`, `?l`, or class |
 | `#(dead\|beef\|cafe){3,}` | occurrences of the words (1-8 hex digits, overlaps count), in all of them together |
+| `#!(dead\|beef\|cafe){max}` | the most words that fit without sharing a digit: `fadecafebeefdead` is 4, `defaced` with the list deface\|face\|aced is 1 (with `#(...)`: 3). `#!@words.txt{max}` from a file |
 | `#@words.txt{4,}` | the same, words from a file (one per line, `#` comments; path relative to the pattern file, or to the current directory on the command line) |
 | `##{,9}` | the number of different digits used: at most 9 (of 16) |
 | `(?)\1{11}` | one digit 12 times in a row. `(?{p})\1{n}` or `(??)\1{n}`: a block of p digits (1-8) repeated, p*(n+1) digits long |
@@ -187,7 +188,7 @@ Records: `{max}` (or `{min}`) in place of the number turns the line into a recor
 repeated single digit of a hex pattern: `^f{max}` (most leading f's), `0{max}` (longest run of zeros), `0{max}$`
 (most zeros at the very end; one token only, e.g. `?l{max}$`),
 `(?)\1{max}` (longest run of one digit), `~{max}`, `+{max}`, `(??)\1{max}` (longest zigzag), `#?l{max}` (most
-letters), `#?l{min}` (fewest letters), `##{min}` (fewest different digits). At most one `{max}`/`{min}` per line.
+letters), `#?l{min}` (fewest letters), `##{min}` (fewest different digits), `#!@words.txt{max}` (most words). At most one `{max}`/`{min}` per line.
 
 ```
 py skinhash.py mojang skins/me.png -m '#0{24,}'                      # normal target, counts for -n

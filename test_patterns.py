@@ -483,6 +483,17 @@ def b_words(v, ws):
     return sum(len(re.findall(f"(?={w})", v)) for w in ws)
 
 
+def b_words_sep(v, ws):
+    """Most words without shared digits, by another method than the dp: interval scheduling, always taking the
+    occurrence that ends first among those starting after the last taken one (optimal for intervals)."""
+    occ = sorted((o + len(w), o) for w in ws for o in range(len(v) - len(w) + 1) if v.startswith(w, o))
+    n, free = 0, 0
+    for end, o in occ:
+        if o >= free:
+            n, free = n + 1, end
+    return n
+
+
 rng = random.Random(77)
 
 
@@ -524,6 +535,7 @@ for width in (64, 16):
             (r"(?)\1{max}", b_period(v, 1)), (r"(??)\1{max}", b_period(v, 2)), (r"(?{3})\1{max}", b_period(v, 3)),
             ("+{max}", b_stair(v, True)), ("-{max}", b_stair(v, False)), ("~{max}", b_pal(v)),
             ("#(dead|beef|a){1,}", b_words(v, ["dead", "beef", "a"])),
+            ("#!(dead|beef|a|ea|aa){1,}", b_words_sep(v, ["dead", "beef", "a", "ea", "aa"])),
         ]
         for line, want in cases:
             if line.endswith("{1,}") and want < 1:
@@ -594,6 +606,13 @@ check(ev(r"(?)\1{3}", "0000" + "12" * 30)[0] is False, "periodic runs do not use
 check(ev("+{4}", "ef01234" + "5" * 57)[0] is True and ev("+{9}", "cdef012345" + "7" * 54)[0] is False, "staircases do not wrap f -> 0")
 check(ev("-{4}", "3210" + "f" * 60)[0] is True and ev("-{5}", "43210fedcba" + "9" * 53)[0] is True and ev("-{6}", "210fedc" + "5" * 57)[0] is False, "down staircases do not wrap 0 -> f")
 check(ev("#(dead){3,}", "deadead" + "1" * 57)[0] is False and ev("#(dead){2,}", "deadead" + "1" * 57)[0] and ev("#(dad|dada){2,}", "dada" + "1" * 60)[0] is True and ev("#(dead){1,}", "deadead" + "1" * 57)[0], "word occurrences overlap")
+check(ev("#!(dead){2,}", "deadead" + "1" * 57)[0] is False and ev("#!(ade|dead){2,}", "deade" + "1" * 59)[0] is False and ev("#!(dead|ead){2,}", "deadead" + "1" * 57)[0] is True
+      and ev("#!(dad|dada){2,}", "dadadad" + "1" * 57)[0] is True, "#!: words may not share digits")
+check(st("#!(dead|beef|cafe|face|fade|deaf|aced|cede|defaced){max}", 16).evaluate("efacedeaf1cede64") == (True, 3)
+      and st("#!(dead|beef|cafe|face|fade){max}", 16).evaluate("fadecafebeefdead") == (True, 4)
+      and st("#!(face|aced|defaced){max}", 16).evaluate("c03fe9defaceded8") == (True, 1), "#!: examples (face deaf cede = 3, defaced = 1)")
+check(pt.split_comment("#!(dead|beef){max}  # note") == ("#!(dead|beef){max}  ", "note"), "#! at the start of a line is a term, not a comment")
+check(st("#!(dead){max}").terms[0].tag() == "sepwords" and st("#!(dead){max}").terms[0].finder_text() == "#!(dead){max}", "#!: tag and finder text")
 check(abs(st("#0{20,}").probability() - 1.2e-15) < 5e-16 or st("#0{20,}").probability() < 1e-9, "odds of a rare count are tiny")
 # odds against Monte Carlo (rough)
 for line in ["#0{6,}", "#?l{,7}", "##{,12}", "+{5}", r"(?)\1{3}", r"(??)\1{2}", "~{8}", "#(dead|a){2,}"]:
@@ -608,7 +627,7 @@ for line in ["#0{6,}", "#?l{,7}", "##{,12}", "+{5}", r"(?)\1{3}", r"(??)\1{2}", 
         mc = sum(sl.match(h) for h in ids) / len(ids)
         check(abs(mc - p) < 0.05 + 0.5 * p, f"odds {line} ({width} digits): calc {p:.4f} vs random ids {mc:.4f}")
 # the GPU model never rejects a match, for threshold lines and records
-LINES = ["#0{2,}", "#?l{,40}", "#?d{,30}", "##{,12}", "+{3}", "-{3}", r"(?)\1{2}", r"(??)\1{1}", "~{7}", "#(dead|beef){1,}", "^de & #0{1,}", "#f{max}", "~{max}", "##{min}", "0{max}$"]
+LINES = ["#0{2,}", "#?l{,40}", "#?d{,30}", "##{,12}", "+{3}", "-{3}", r"(?)\1{2}", r"(??)\1{1}", "~{7}", "#(dead|beef){1,}", "#!(a|aa|ea){2,}", "^de & #0{1,}", "#f{max}", "~{max}", "##{min}", "0{max}$"]
 for width in (64, 16):
     bad = 0
     for h in rand_ids(width, 400):
@@ -646,7 +665,7 @@ int main(void) {
 }
 '''
 STAT_CASES = ["#0{3,}", "#?l{,25}", "#?d{20,}", "#[0-3]{12,}", "##{,12}", "##{min}", "+{4}", "-{3}", "+{max}", r"(?)\1{2}", r"(??)\1{1}",
-              r"(?{3})\1{max}", "~{6}", "~{max}", "#(dead|beef|a){2,}", "#(c0ffee){max}", "^f{max}", "0{max}", "^dead0{max}", "0{max}$", "?l{max}$", "^de & #0{1,}", "#0{max}&?l{3}", "#?l{min}"]
+              r"(?{3})\1{max}", "~{6}", "~{max}", "#(dead|beef|a){2,}", "#(c0ffee){max}", "#!(dead|beef|a){2,}", "#!(a|aa|ead|dea){max}", "^f{max}", "0{max}", "^dead0{max}", "0{max}$", "?l{max}$", "^de & #0{1,}", "#0{max}&?l{3}", "#?l{min}"]
 if shutil.which("gcc"):
     with tempfile.TemporaryDirectory(prefix="skinhash_patc2_") as tmp:
         c, exe = os.path.join(tmp, "s.c"), os.path.join(tmp, "s.exe")
@@ -711,7 +730,7 @@ else:
 # ---- the GPU stat code against the C reference ---------------------------------------------------------------------
 GPU_LINES = ["#0{3,}", "#?l{,25}", "#?l{50,}", "#?d{20,}", "#[0-3]{12,}", "#f{max}", "#0{min}", "##{,12}", "##{min}", "+{3}", "-{3}", "+{max}", "-{max}",
              r"(?)\1{2}", r"(?)\1{max}", r"(??)\1{1}", r"(??)\1{max}", r"(?{3})\1{max}", r"(?{8})\1{1}", "~{5}", "~{9}", "~{max}",
-             "#(dead|beef|a){2,}", "#(dead|c0ffee){max}", "^f{max}", "0{max}", "0{max}$", "[0-7]{max}$", "^de & #0{1,}", "#0{max} & ^?l"]
+             "#(dead|beef|a){2,}", "#(dead|c0ffee){max}", "#!(dead|beef|a){2,}", "#!(a|aa|ea|dead){max}", "#!(c0ffee|ffee|c0|0){max}", "^f{max}", "0{max}", "0{max}$", "[0-7]{max}$", "^de & #0{1,}", "#0{max} & ^?l"]
 for exe_name, width in (("gpufinder", 64), ("namemcgpu", 16)):
     exe = os.path.join(HERE, exe_name + ".exe")
     if not os.path.exists(exe):
@@ -723,9 +742,12 @@ for exe_name, width in (("gpufinder", 64), ("namemcgpu", 16)):
             args += ["-m", st(line, width).finder_text()]
         except pt.PatternError:
             pass
-    r = subprocess.run([exe, "--stat-selftest", *args], capture_output=True, text=True, timeout=300)
-    check(r.returncode == 0 and "stat selftest: OK" in r.stdout,
-          f"{exe_name}: every stat kind equals the C reference on 120000 random and crafted ids x 3 record bests (none, a median, near the top) ({r.stdout.strip()[-80:]}{r.stderr.strip()[-200:]})")
+    outs, ok = [], True
+    for b in range(0, len(args), 60):     # batches of 30 lines (a group has at most 32)
+        r = subprocess.run([exe, "--stat-selftest", *args[b:b + 60]], capture_output=True, text=True, timeout=300)
+        ok = ok and r.returncode == 0 and "stat selftest: OK" in r.stdout
+        outs.append(r.stdout.strip()[-80:] + r.stderr.strip()[-200:])
+    check(ok, f"{exe_name}: every stat kind equals the C reference on 120000 random and crafted ids x 3 record bests (none, a median, near the top) ({'; '.join(outs)})")
 
 
 # ---- end to end on skins/steve.png ----------------------------------------------------------------------------

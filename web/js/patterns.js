@@ -286,7 +286,7 @@ export function stripComment(line) {
   for (let i = 0; i < line.length; i++) {
     if (line[i] !== "#") continue;
     const prev = line.slice(0, i).trimEnd(), nxt = (line[i + 1] || "").toLowerCase();
-    if ((!prev || ",&".includes(prev[prev.length - 1])) && nxt && (HEXDIGITS + "?[(@#").includes(nxt)) { if (nxt === "#") i++; continue; }
+    if ((!prev || ",&".includes(prev[prev.length - 1])) && nxt && (HEXDIGITS + "?[(@#!").includes(nxt)) { if (nxt === "#") i++; continue; }
     return line.slice(0, i);
   }
   return line;
@@ -330,6 +330,7 @@ export function parsePatternText(text, width) {
 // A stat line is one or more terms joined by '&' (all must hold). Terms:
 //   #S{range}        count of digits in S (a digit, ?, ?d, ?l or a class) in the id
 //   #(w1|w2){range}  occurrences of hex words of 1-8 digits (overlaps count)
+//   #!(w1|w2){range} the most words that share no digit (fadecafe = 2, defaced = 1)
 //   ##{range}        number of different digits
 //   ~{n}  +{n}  -{n} a palindrome / staircase up / staircase down of at least n digits
 //   (?)\1{n} (??)\1{n} (?{p})\1{n}   a run with period p (1..8) of p*(n+1) digits
@@ -382,6 +383,16 @@ export function countWords(v, words) {
   let total = 0;
   for (const w of words) for (let o = 0; o + w.length <= v.length; o++) if (w.every((d, i) => v[o + i] === d)) total++;
   return total;
+}
+/** #!(...): the most words that fit in v without sharing a digit (dp from the right, as patterns.py count_words_sep). */
+export function countWordsSep(v, words) {
+  const n = v.length, dp = new Array(n + 1).fill(0);
+  for (let o = n - 1; o >= 0; o--) {
+    let best = dp[o + 1];
+    for (const w of words) if (o + w.length <= n && w.every((d, i) => v[o + i] === d)) best = Math.max(best, 1 + dp[o + w.length]);
+    dp[o] = best;
+  }
+  return dp[0];
 }
 
 // -- odds of the stats (Mojang: the link id, i.e. 64 digits minus the leading zeros, first digit 1-f) --
@@ -488,6 +499,7 @@ export class StatTerm {
     this.cset = kw.cset || 0; this.words = kw.words || null; this.period = kw.period || 0;
     this.pattern = kw.pattern || null; this.prefix = kw.prefix || null; this.tok = kw.tok || 0; this.start = !!kw.start;
     this.end = !!kw.end;   // X{max}$: the run that ends the id
+    this.sep = !!kw.sep;   // #!(...): words may not share digits
   }
   endRun(h) { let run = 0; while (run < h.length && (this.tok >> h[h.length - 1 - run]) & 1) run++; return run; }
   finderText() { return this.text; }
@@ -518,7 +530,7 @@ export class StatTerm {
         return best;
       }
       case "count": return vis.filter((c) => (this.cset >> c) & 1).length;
-      case "words": return countWords(vis, this.words);
+      case "words": return this.sep ? countWordsSep(vis, this.words) : countWords(vis, this.words);
       case "distinct": return new Set(vis).size;
       case "period": return longestPeriod(vis, this.period);
       case "up": case "down": return longestStair(vis, this.kind === "up");
@@ -590,6 +602,7 @@ export class StatTerm {
       return `count${name}`;
     }
     if (k === "hex") return (this.end ? "hexend-" : this.start ? "hexstart-" : "hex-") + this.text.replace("{max}", "").replace(/[^0-9a-z]+/g, "").slice(0, 12);
+    if (k === "words" && this.sep) return "sepwords";
     return ({ words: "words", distinct: "distinct", up: "up", down: "down", pal: "pal" })[k] || `run${this.period}`;
   }
 }
@@ -672,14 +685,16 @@ function parseTerm(raw, off, width) {
     if (p <= 0) throw new PatternError(`'${s}' can never hold`);
     return t;
   };
-  if (s.startsWith("#@")) throw new PatternError(`'#@FILE' at position ${off + 1}: the browser cannot read files by name; write the words in the line: #(dead|beef|cafe){4,}`);
+  const sep = s.startsWith("#!");
+  if (s.startsWith("#@") || s.startsWith("#!@")) throw new PatternError(`'${sep ? "#!@" : "#@"}FILE' at position ${off + 1}: the browser cannot read files by name; write the words in the line: ${sep ? "#!" : "#"}(dead|beef|cafe){4,}`);
+  if (sep && !s.startsWith("#!(")) throw new PatternError(`'#!' at position ${P(0)}: words without shared digits: #!(dead|beef){max}`);
   if (s.startsWith("##")) {
     const { lo, hi, rec } = parseRange(s, 2, P);
     if (rec === "max") throw new PatternError(`'${s}': nearly every id uses all 16 digits; use ##{min} or a range like ##{,9}`);
     return checkCount(new StatTerm("distinct", s, width, lo, hi, rec), 16);
   }
   if (s.startsWith("#")) {
-    let i = 1;
+    let i = sep ? 2 : 1;
     if (i >= s.length) throw new PatternError(`'#' at position ${P(0)}: count what? e.g. #0{24,}, #?l{,5}, #[0-3]{20,}, #(dead|beef){3,}`);
     const c = s[i];
     let words = null, cset = 0;
@@ -714,7 +729,7 @@ function parseTerm(raw, off, width) {
     if (words) {
       if (rec === "min") throw new PatternError(`'${s}': {min} of a word count is almost always 0; use {max} or a range`);
       if (!rec && lo === 0 && hi === null) throw new PatternError(always);
-      return checkCount(new StatTerm("words", s, width, lo, hi, rec, { words }), width);
+      return checkCount(new StatTerm("words", s, width, lo, hi, rec, { words, sep }), width);
     }
     return checkCount(new StatTerm("count", s, width, lo, hi, rec, { cset }), width);
   }

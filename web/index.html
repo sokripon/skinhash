@@ -72,6 +72,7 @@
         <tr><td><code>#?l{,0}</code> <code>#?l{50,}</code></td><td>letters a-f: none / at least 50 (<code>#?d</code> digits, <code>#[0-3]</code> any class)</td></tr>
         <tr><td><code>##{,9}</code></td><td>at most 9 different digits</td></tr>
         <tr><td><code>#(dead|beef|cafe){3,}</code></td><td>words (1-8 digits) found at least 3 times together, overlaps count</td></tr>
+        <tr><td><code>#!(dead|beef|cafe){max}</code></td><td>the most words that fit without sharing a digit (fadecafe = 2)</td></tr>
         <tr><td><code>(?)\1{11}</code></td><td>one digit 12 times in a row (<code>(??)\1{6}</code> a pair 7 times = a zigzag like 7c7c7c7c7c7c7c; <code>(?{3})\1{4}</code> a triple, period 1 to 8)</td></tr>
         <tr><td><code>+{12}</code> <code>-{12}</code></td><td>staircase up / down of 12 digits (no wrap from f to 0)</td></tr>
         <tr><td><code>~{25}</code></td><td>a palindrome of at least 25 digits</td></tr>

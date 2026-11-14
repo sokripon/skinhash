@@ -1,4 +1,4 @@
-// Stat lines (patterns.js StatLine) in WGSL: counts, different digits, word counts, periodic runs, staircases, palindromes
+// Stat lines (patterns.js StatLine) in WGSL: counts, different digits, word counts (#!: without shared digits), periodic runs, staircases, palindromes
 // and X{max} runs, computed on the digest words of a candidate. Same values as the reference (StatTerm.value), see
 // "Stat lines" in docs/how-it-works.md. Everything is baked into the generated shader text; a shader without stat lines
 // contains none of it.
@@ -174,6 +174,21 @@ export function statCode(lines, words, { zl, SE, rbIdx = (ri) => `${ri}u` }) {
           return sh === 0 ? X(w) : (w + 1 < W ? `((${X(w)} << ${sh}u) | (${X(w + 1)} >> ${32 - sh}u))` : `(${X(w)} << ${sh}u)`);
         };
         for (let o = 0; o < width; o++) c += `let w${o} = ${win(o)}; `;
+        if (t.sep) {   // #!(...): d<o> = the most words that share no digit in digits o.. (dp from the right)
+          const enc = t.words.map((wd) => {
+            let pat = 0;
+            wd.forEach((d, i) => { pat |= d << (28 - 4 * i); });
+            return { n: wd.length, pat: pat >>> 0, mask: wd.length === 8 ? 0xFFFFFFFF : (0xFFFFFFFF << (32 - 4 * wd.length)) >>> 0 };
+          });
+          c += `let d${width} = 0u; `;
+          for (let o = width - 1; o >= 0; o--) {
+            let e = `d${o + 1}`;
+            for (const { n, pat, mask } of enc)
+              if (o + n <= width) e = `max(${e}, select(0u, 1u + d${o + n}, ((w${o} ^ ${hex(pat)}) & ${hex(mask)}) == 0u && ${o}u >= zl))`;
+            c += `let d${o} = ${e}; `;
+          }
+          return c + `let v = d0; ` + fin("v", cmpCond("v", t));
+        }
         c += "var v = 0u; ";
         for (const wd of t.words) {
           const n = wd.length;

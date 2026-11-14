@@ -419,6 +419,7 @@ def _parse(text, width):
 # A stat line is one or more terms joined by '&' (all must hold). Terms:
 #   #S{range}        count of digits in S (a digit, ?, ?d, ?l or a class) in the id
 #   #(w1|w2){range}  occurrences of hex words (overlaps count); #@FILE{range}: the words of a file
+#   #!(w1|w2){range} the most words that fit without sharing a digit (fadecafe = 2, defaced = 1); #!@FILE{range}
 #   ##{range}        number of different digits
 #   ~{n}  +{n}  -{n} a palindrome / staircase up / staircase down of at least n digits
 #   (?)\1{n} (??)\1{n} (?{p})\1{n}   a run with period p (1..8) of p*(n+1) digits
@@ -495,6 +496,21 @@ def count_words(v, words):
         n = len(w)
         total += sum(1 for o in range(len(v) - n + 1) if v[o:o + n] == w)
     return total
+
+
+def count_words_sep(v, words):
+    """The most words that fit in v without sharing a digit (each digit belongs to at most one word). dp[o]: the best
+    for v[o:], from the right: skip digit o, or take a word that starts at o."""
+    n = len(v)
+    dp = [0] * (n + 1)
+    for o in range(n - 1, -1, -1):
+        best = dp[o + 1]
+        for w in words:
+            L = len(w)
+            if o + L <= n and v[o:o + L] == w:
+                best = max(best, 1 + dp[o + L])
+        dp[o] = best
+    return dp[0]
 
 
 # -- odds of the stats (Mojang: the link id, i.e. 64 digits minus the leading zeros, first digit 1-f) --
@@ -615,6 +631,7 @@ class StatTerm:
         self.cset = kw.get("cset", 0)
         self.words = kw.get("words")          # lists of nibbles
         self.wsrc = kw.get("wsrc")            # '#@file' source text, or None
+        self.sep = kw.get("sep", False)       # #!(...): words may not share digits
         self.period = kw.get("period", 0)
         self.pattern = kw.get("pattern")      # hex term
         self.prefix, self.tok, self.start = kw.get("prefix"), kw.get("tok", 0), kw.get("start", False)
@@ -627,7 +644,7 @@ class StatTerm:
         """The text the finders parse: word files expanded to #(w1|w2|...)."""
         if self.kind == "words" and self.wsrc:
             rng = self.text[self.text.rfind("{"):]
-            return "#(" + "|".join("".join(HEXDIGITS[c] for c in w) for w in self.words) + ")" + rng
+            return ("#!(" if self.sep else "#(") + "|".join("".join(HEXDIGITS[c] for c in w) for w in self.words) + ")" + rng
         return self.text
 
     def hex_k(self, k):
@@ -667,7 +684,7 @@ class StatTerm:
         if k == "count":
             return sum(1 for c in vis if self.cset >> c & 1)
         if k == "words":
-            return count_words(vis, self.words)
+            return count_words_sep(vis, self.words) if self.sep else count_words(vis, self.words)
         if k == "distinct":
             return len(set(vis))
         if k == "period":
@@ -766,6 +783,8 @@ class StatTerm:
             return f"count{name}"
         if k == "hex":
             return ("hexend-" if self.end else "hexstart-" if self.start else "hex-") + re.sub(r"[^0-9a-z]+", "", self.text.replace("{max}", "")) [:12]
+        if k == "words" and self.sep:
+            return "sepwords"
         return {"words": "words", "distinct": "distinct", "up": "up", "down": "down", "pal": "pal"}.get(k, f"run{self.period}")
 
 
@@ -915,7 +934,10 @@ def parse_term(raw, off, width, base):
             raise PatternError(f"'{s}' can never hold")
         return t
 
-    if s.startswith("#@"):
+    sep = s.startswith("#!")
+    if sep and not (s.startswith("#!(") or s.startswith("#!@")):
+        raise PatternError(f"'#!' at position {P(0)}: words without shared digits: #!(dead|beef){{max}} or #!@words.txt{{max}}")
+    if s.startswith("#@") or s.startswith("#!@"):
         at, j = sr.index("@"), sr.rfind("{")
         if j < at:
             raise PatternError(f"'#@FILE' at position {off + 1} needs a range: #@words.txt{{4,}}")
@@ -927,14 +949,15 @@ def parse_term(raw, off, width, base):
         if not rec and lo == 0 and hi is None:
             raise PatternError(always)
         words = read_words(path, base)
-        return check_count(StatTerm("words", f"#@{path}{rs}", width, lo, hi, rec, words=words, wsrc=path), width)
+        return check_count(StatTerm("words", f"{'#!' if sep else '#'}@{path}{rs}", width, lo, hi, rec, words=words, wsrc=path,
+                                    sep=sep), width)
     if s.startswith("##"):
         lo, hi, rec, _ = parse_range(s, 2, P)
         if rec == "max":
             raise PatternError(f"'{s}': nearly every id uses all 16 digits; use ##{{min}} or a range like ##{{,9}}")
         return check_count(StatTerm("distinct", s, width, lo, hi, rec), 16)
     if s.startswith("#"):
-        i = 1
+        i = 2 if sep else 1
         if i >= len(s):
             raise PatternError(f"'#' at position {P(0)}: count what? e.g. #0{{24,}}, #?l{{,5}}, #[0-3]{{20,}}, #(dead|beef){{3,}}")
         c, words, cset = s[i], None, 0
@@ -976,7 +999,7 @@ def parse_term(raw, off, width, base):
                 raise PatternError(f"'{s}': {{min}} of a word count is almost always 0; use {{max}} or a range")
             if not rec and lo == 0 and hi is None:
                 raise PatternError(always)
-            return check_count(StatTerm("words", s, width, lo, hi, rec, words=words), width)
+            return check_count(StatTerm("words", s, width, lo, hi, rec, words=words, sep=sep), width)
         return check_count(StatTerm("count", s, width, lo, hi, rec, cset=cset), width)
     if s[0] in SHAPES or s[0] == "(":
         if s[0] == "(":
@@ -1082,12 +1105,13 @@ def split_commas(s):
 
 def split_comment(line):
     """(pattern part, comment text) of a pattern file line. '#' starts a comment, except where it starts a count term
-    (#0{24,}, ##{,9}, #@words.txt): at the start of the line or after ',' or '&', followed by a digit, ?, [, (, @ or #."""
+    (#0{24,}, ##{,9}, #@words.txt, #!(dead|beef)): at the start of the line or after ',' or '&', followed by a digit, ?, [, (,
+    @, # or !."""
     i = 0
     while i < len(line):
         if line[i] == "#":
             prev, nxt = line[:i].rstrip(), line[i + 1:i + 2].lower()
-            if (not prev or prev[-1] in ",&") and nxt and nxt in HEXDIGITS + "?[(@#":
+            if (not prev or prev[-1] in ",&") and nxt and nxt in HEXDIGITS + "?[(@#!":
                 i += 2 if nxt == "#" else 1
                 continue
             return line[:i], line[i + 1:].strip()

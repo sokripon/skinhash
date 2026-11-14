@@ -248,6 +248,7 @@ static inline int mpat_find(const mpat_t *pats, int n, const uint8_t *dg) {
  * normalised text (lower case, no spaces, word files expanded): terms joined by '&', each one of
  *   #S{range}  count of the digits in S (a digit, ?, ?d, ?l, [class]) in the visible id
  *   #(w1|w2){range}   occurrences of the words (1-8 digits; overlaps count)
+ *   #!(w1|w2){range}  the most words that share no digit
  *   ##{range}  number of different digits
  *   ~{n} +{n} -{n}  palindrome / staircase up / staircase down of >= n digits
  *   (?)\1{n} (??)\1{n} (?{p})\1{n}  periodic run of p*(n+1) digits
@@ -269,6 +270,7 @@ typedef struct {
     int period;                     /* ST_PERIOD */
     uint16_t cset;                  /* ST_COUNT */
     int nwords; uint8_t wlen[ST_MAXWORDS]; uint8_t word[ST_MAXWORDS][8];
+    int sep;                        /* ST_WORDS #!(...): the most words that share no digit */
     int start, npre; uint16_t pre[MPAT_MAXTOK], tok;   /* ST_HEX with {max}: prefix tokens and the repeated token */
     int end;                                           /* X{max}$: the run that ends the id (no prefix) */
     mpat_t pat;                     /* ST_HEX threshold */
@@ -345,6 +347,10 @@ static inline int st_parse_term(const char *s, const char *e, int width, sterm_t
     }
     if (s[0] == '#') {
         const char *p = s + 1;
+        if (*p == '!') {
+            if (p[1] != '(') return st_err(err, errlen, "#! takes a word list: #!(dead|beef){max}", whole);
+            t->sep = 1; p++;
+        }
         if (*p == '(') {
             const char *q = strchr(p, ')');
             if (!q || q >= e) return st_err(err, errlen, "unclosed (", whole);
@@ -480,6 +486,19 @@ static inline int st_longest_pal(const uint8_t *v, int n) {
     return best;
 }
 static inline int st_count_words(const uint8_t *v, int n, const sterm_t *t) {
+    if (t->sep) {   /* dp[o]: the most digit-disjoint words in v[o..n), from the right */
+        int dp[65];
+        dp[n] = 0;
+        for (int o = n - 1; o >= 0; o--) {
+            int best = dp[o + 1];
+            for (int w = 0; w < t->nwords; w++) {
+                int len = t->wlen[w];
+                if (o + len <= n && !memcmp(v + o, t->word[w], (size_t)len) && 1 + dp[o + len] > best) best = 1 + dp[o + len];
+            }
+            dp[o] = best;
+        }
+        return dp[0];
+    }
     int total = 0;
     for (int w = 0; w < t->nwords; w++) {
         int len = t->wlen[w];

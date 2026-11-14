@@ -80,7 +80,7 @@ for (const t of ["#0{24,}", "#?l{,0}", "#?l{50,}", "#[0-3]{20,}", "#(dead|beef|c
 for (const [t, want] of [["#", "count what"], ["#0", "missing range"], ["#0{3", "unclosed"], ["#0{x}", "a range is"], ["#0{5,2}", "goes backwards"], ["#0{,}", "a range is"],
   ["##{max}", "nearly every id"], ["+{min}", "{min} is only for counts"], ["~{3,5}", "takes {n}"], ["~{1}", "always holds"], ["~{65}", "needs 65 digits"],
   ["(?)\\2{3}", "only the periodic-run form"], ["(?)", "only the periodic-run form"], ["(?{9})\\1{2}", "period 9"], ["(?{0})\\1{2}", "period 0"], ["(?)\\1{0}", "at least 1"],
-  ["#0{3}{4}", "after the range"], ["#(xyz){3,}", "hex words"], ["#(deadbeefc){3,}", "1-8 digits"], ["#@words.txt{4,}", "write the words in the line"],
+  ["#0{3}{4}", "after the range"], ["#(xyz){3,}", "hex words"], ["#(deadbeefc){3,}", "1-8 digits"], ["#@words.txt{4,}", "write the words in the line"], ["#!@words.txt{4,}", "write the words in the line"], ["#!0{3,}", "words without shared digits"],
   ["#0{max} & #1{max}", "at most one"], ["^dead & ", "empty term"], ["0{min}", "{min} is only"], ["^f{max}$", "a run at the end takes a single token"], ["0{max}*1", "{max} repeats"], ["a{2,3}", "ranges are for counts"],
   ["#0{0,}", "always holds"], ["#0{70,}", "can never hold"], ["##{20,}", "can never hold"], ["#0{3,} & & #1{3,}", "empty term"], ["#dead{3,}", "write #("]]) {
   const e = errOf(t);
@@ -115,6 +115,10 @@ check(ev("(??)\\1{max}", pad("17c7c7c7c7c1", 64)).value === 10 && ev("(??)\\1{4}
 check(ev("~{max}", pad("0001234321", 64)).value >= 7, "palindrome value");
 check(ev("##{,3}", "1212121212121212").ok && !ev("##{,3}", "1234121212121212").ok && ev("##{min}", "1234121212121212").value === 4, "different digits");
 check(ev("#(dead|beef){3,}", pad("0000deadbeefdead", 64)).ok && ev("#(aa){max}", pad("1aaaaaa", 64)).value === 5, "word count, overlaps count");
+check(ev("#!(aa){max}", pad("1aaaaaa", 64)).value === 3 && ev("#!(dead|beef|cafe|face|fade){max}", "fadecafebeefdead").value === 4
+  && ev("#!(dead|beef|cafe|face|fade|deaf|aced|cede|defaced){max}", "efacedeaf1cede64").value === 3 && !ev("#!(ade|dead){2,}", pad("deade", 64)).ok && ev("#!(dead|ead){2,}", pad("deadead", 64)).ok,
+  "#!: words without shared digits");
+check(stripComment("#!(dead|beef){max} # note") === "#!(dead|beef){max} ", "stripComment keeps #! terms");
 check(ev("^f{max}", "fff" + "1".repeat(61)).value === 3 && ev("^f{max}", "1" + "f".repeat(63)).value === 0 && ev("0{max}", pad("10000", 64)).value === 4, "hex X{max}");
 check(ev("^dead & #0{3,}", "dead" + "0".repeat(10) + "1".repeat(50)).ok && !ev("^dead & #0{3,}", "beef" + "0".repeat(10) + "1".repeat(50)).ok, "A & B");
 

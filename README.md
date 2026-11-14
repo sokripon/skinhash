@@ -476,6 +476,16 @@ Limits: at most 4096 hits are kept per kernel launch (use a stricter pattern if 
 The `Dockerfile` builds everything inside the container, so the host needs no CUDA toolkit, Visual Studio or gcc.
 You only need Docker (on Windows: Docker Desktop with WSL2) and, for the GPU engines, an NVIDIA driver 580 or newer.
 
+A ready image with all GPU architectures is published on GitHub (built by `.github/workflows/docker.yml` whenever
+the sources change), so you can skip the ~15 minute build:
+
+```
+docker pull ghcr.io/sokripon/skinhash
+docker run --rm -it --gpus all -v "${PWD}:/work" ghcr.io/sokripon/skinhash namemc skins/me.png -o found/nm_me
+```
+
+Or build it yourself:
+
 ```
 docker build -t skinhash .                                  # all GPU architectures
 docker build --build-arg CUDA_ARCHS=120 -t skinhash .       # only yours (120 = RTX 50, 89 = RTX 40, 86 = RTX 30): faster
